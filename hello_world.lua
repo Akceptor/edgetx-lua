@@ -8,12 +8,11 @@ local function run(event)
     lcd.clear()
     
     -- Calculate center position for the text
-    local textWidth = lcd.getTextWidth("Hello World", MIDSIZE)
-    local x = (screenWidth - textWidth) / 2
+    local x = screenWidth / 2
     local y = screenHeight / 2
     
     -- Draw centered text
-    lcd.drawText(x, y, "Hello World", MIDSIZE)
+    lcd.drawText(x, y, "Hello World", CENTER + MIDSIZE)
     
     -- Return 0 to keep the script running
     return 0
