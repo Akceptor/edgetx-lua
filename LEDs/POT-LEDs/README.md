@@ -1,0 +1,1 @@
+Lights LEDs according S1 and S2 pots
