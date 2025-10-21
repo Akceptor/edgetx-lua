@@ -1,3 +1,4 @@
+-- /SCRIPTS/MODEL/stickrec/main.lua
 -- Records CH1..CH5 at 50 Hz to /LOGS/stickrec.csv and replays them via GV1..GV5.
 -- SD↑ = RECORD (LEDs RED), SD↓ = PLAY (LEDs GREEN), SD– = STOP (LEDs OFF)
 
