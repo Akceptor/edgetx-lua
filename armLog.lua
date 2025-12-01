@@ -18,7 +18,7 @@ end
 
 local function write(text, newline)
   local y,mo,d = getTimeParts()
-  local filename = "/LOGS/" .. d .. "_" .. mo .. "_" .. y .. ".txt"
+  local filename = string.format("/LOGS/%02d_%02d_%04d.txt", d, mo, y)
 
   local ok, f = pcall(io.open, filename, "a")
   if ok and f then
