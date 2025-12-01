@@ -1,4 +1,5 @@
 -- TNS|Calendar|TNE
+
 local screenW = LCD_W
 local screenH = LCD_H
 
@@ -11,6 +12,7 @@ local current = getDateTime()
 local viewYear = current.year
 local viewMonth = current.mon
 local selectedDay = current.day
+
 local HEADER_Y = 10
 local HEADER_MARGIN = 8
 local WEEKDAY_HEIGHT = 22
@@ -27,7 +29,7 @@ local function getMonthDays(y,m)
   return daysInMonth[m]
 end
 
--- Monday=1 … Sunday=7
+-- Monday = 1 … Sunday = 7
 local function weekday(y,m,d)
   if m < 3 then
     m = m + 12
@@ -36,12 +38,15 @@ local function weekday(y,m,d)
   local k = y % 100
   local j = math.floor(y / 100)
   local h = (d + math.floor((13*(m+1))/5) + k + math.floor(k/4) + math.floor(j/4) + 5*j) % 7
-  local dow = ((h + 5) % 7) + 1   -- Monday=1
+  local dow = ((h + 5) % 7) + 1
   return dow
 end
 
 local function monthName(m)
-  local t = {"January","February","March","April","May","June","July","August","September","October","November","December"}
+  local t = {
+    "January","February","March","April","May","June",
+    "July","August","September","October","November","December"
+  }
   return t[m]
 end
 
@@ -65,6 +70,9 @@ local function moveSelection(delta)
   clampSelection()
 end
 
+---------------------------------------------------------------
+-- DRAW CALENDAR
+---------------------------------------------------------------
 local function drawCalendar()
   lcd.setColor(CUSTOM_COLOR, BG)
   lcd.drawFilledRectangle(0, 0, screenW, screenH, CUSTOM_COLOR)
@@ -106,9 +114,7 @@ local function drawCalendar()
 
     local isWeekend = (col >= 6)
     local textColor = isWeekend and lcd.RGB(200,0,0) or lcd.RGB(0,0,0)
-
     lcd.setColor(CUSTOM_COLOR, textColor)
-
     local flags = BOLD
 
     local boxX = x - 2
@@ -118,6 +124,7 @@ local function drawCalendar()
     local isToday = isTodayMonth and day == today.day
     local isSelected = day == selectedDay
 
+    -- TODAY highlight
     if isToday then
       lcd.setColor(CUSTOM_COLOR, TODAY_BG)
       lcd.drawFilledRectangle(boxX, boxY, boxW, boxH, CUSTOM_COLOR)
@@ -132,7 +139,20 @@ local function drawCalendar()
       lcd.drawRectangle(boxX-1, boxY-1, boxW+2, boxH+2, SOLID)
     end
 
-    lcd.drawText(x, yy, tostring(day), CUSTOM_COLOR + flags)
+    -----------------------------------------------------------
+    -- CHECK FOR LOG FILE: /LOGS/DD_MM_YYYY.txt
+    -----------------------------------------------------------
+    local logPath = string.format("/LOGS/%02d_%02d_%04d.txt", day, month, year)
+    local hasLog = false
+    local ok, info = pcall(fstat, logPath)
+    if ok and info then
+      hasLog = true
+    end
+
+    -- Day text with optional "*"
+    local displayDay = hasLog and (tostring(day) .. "*") or tostring(day)
+
+    lcd.drawText(x, yy, displayDay, CUSTOM_COLOR + flags)
 
     col = col + 1
     if col > 7 then
@@ -144,6 +164,9 @@ local function drawCalendar()
   end
 end
 
+---------------------------------------------------------------
+-- TOUCH & ROTARY HANDLING
+---------------------------------------------------------------
 local function handleTouch(event, touchState)
   local t = touchState or {}
 
@@ -152,13 +175,14 @@ local function handleTouch(event, touchState)
     elseif t.swipeRight then changeMonth(-1) end
 
   elseif event == EVT_TOUCH_TAP then
-    -- Tap to select a day if tapping inside the grid
     local x = t.x or -1
     local y = t.y or -1
     local cellW = screenW // 7
+
     local title = string.format("%s %d", monthName(viewMonth), viewYear)
     local _, th = lcd.sizeText(title, MIDSIZE + BOLD)
-    local yStart = HEADER_Y + th + HEADER_MARGIN + WEEKDAY_HEIGHT  -- top of days grid
+    local yStart = HEADER_Y + th + HEADER_MARGIN + WEEKDAY_HEIGHT
+
     if y >= yStart - 4 then
       local row = math.floor((y - yStart) / CELL_HEIGHT)
       local col = math.floor(x / cellW)
@@ -175,6 +199,9 @@ local function handleTouch(event, touchState)
   end
 end
 
+---------------------------------------------------------------
+-- MAIN RUN FUNCTION
+---------------------------------------------------------------
 local function run(event, touchState)
   if event and event ~= 0 then
     if event == EVT_ROT_RIGHT then moveSelection(1)
