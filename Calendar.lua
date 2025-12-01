@@ -1,4 +1,5 @@
 -- TNS|Calendar|TNE
+-- Use with https://github.com/Akceptor/edgetx-lua/blob/main/armLog.lua
 
 ---------------------------------------------------------------------
 -- CONFIG
