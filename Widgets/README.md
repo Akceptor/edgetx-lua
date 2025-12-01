@@ -1,1 +1,1 @@
-EdgeTX Widgets
+ EdgeTX Widgets
