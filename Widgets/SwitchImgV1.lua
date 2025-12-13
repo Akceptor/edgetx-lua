@@ -90,22 +90,10 @@ local function refresh(widget, event, touchState)
   local slot = pickSlot(value)
   local entry = widget.bitmaps[slot] or {}
   local bmp = entry.bmp
-  local path = entry.path or ""
-  local filename = string.match(path, "([^/]+)$") or path or "none"
 
   if bmp then
     lcd.drawBitmap(bmp, x, y)
-  else
-    lcd.setColor(CUSTOM_COLOR, lcd.RGB(255, 255, 255))
-    lcd.drawText(x + 4, y + 4, "No image: " .. slot, CUSTOM_COLOR + SMLSIZE)
   end
-
-  -- show which file is selected
-  lcd.setColor(CUSTOM_COLOR, lcd.RGB(255, 255, 255))
-  local line1Y = y + h - 20
-  local line2Y = line1Y + 12
-  lcd.drawText(x + 4, line1Y, "File: " .. filename, CUSTOM_COLOR + SMLSIZE)
-  lcd.drawText(x + 4, line2Y, "Path: " .. path, CUSTOM_COLOR + SMLSIZE)
 end
 
 return {
