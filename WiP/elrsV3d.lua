@@ -4,6 +4,7 @@
 ---- # Copyright (C) OpenTX, adapted for ExpressLRS                          #
 -----#                                                                       #
 ---- # License GPLv2: http://www.gnu.org/licenses/gpl-2.0.html               #
+-----# Debug version - populates VRX config for QVtx                         #
 ---- #                                                                       #
 ---- #########################################################################
 local EXITVER = "-- EXIT (Lua r15) --"
@@ -49,14 +50,11 @@ local function formatPayload(payload)
   if not payload then
     return ""
   end
-  local hex = ""
+  local parts = {}
   for i = 1, #payload do
-    if i > 1 then
-      hex = hex .. " "
-    end
-    hex = hex .. string.format("%02X", payload[i])
+    parts[#parts+1] = string.format("%02X", payload[i])
   end
-  return hex
+  return table.concat(parts, " ")
 end
 
 local function clonePayload(payload)
@@ -403,7 +401,7 @@ local function fieldFolderDeviceOpen(field)
 end
 
 local function fieldFolderDisplay(field,y ,attr)
-  lcd.drawText(COL1, y, "> " .. field.id .. " " .. field.name, attr + BOLD)
+  lcd.drawText(COL1, y,(field.name or ""), attr + BOLD)
 end
 
 local function fieldCommandLoad(field, data, offset)
@@ -418,7 +416,7 @@ local function fieldCommandLoad(field, data, offset)
   if not dry then
     dry = {
       type = FIELD_TYPE_DRYRUN,
-      name = "dry run",
+      name = "save config",
       isDryRun = true,
     }
     field.dryRunField = dry
@@ -463,6 +461,46 @@ local function fieldDryRunSave(field)
   local lines = {}
   lines[#lines+1] = "Command: " .. payloadHex
 
+  local function findSiblingFieldId(keyword)
+    local key = string.lower(keyword)
+    for i = 1, #fields do
+      local sibling = fields[i]
+      if sibling ~= commandField
+        and sibling.parent == commandField.parent
+        and sibling.lastSentPayload
+        and sibling.lastSentPayload.payload
+        and sibling.name then
+        if string.find(string.lower(sibling.name), key, 1, true) then
+          return sibling.lastSentPayload.payload[3]
+        end
+      end
+    end
+    return nil
+  end
+
+  local function toHexByte(val)
+    if not val then
+      return ""
+    end
+    return string.format("0x%02X", val)
+  end
+
+  local function writeVtxConfigFile(bandId, channelId, commandId)
+    local file = io.open("vtxConfig.cfg", "w")
+    if not file then
+      return false
+    end
+    io.write(file, "Band: ", toHexByte(bandId), "\n")
+    io.write(file, "Channel: ", toHexByte(channelId), "\n")
+    io.write(file, "Command: ", toHexByte(commandId), "\n")
+    io.close(file)
+    return true
+  end
+
+  local bandId = findSiblingFieldId("band")
+  local channelId = findSiblingFieldId("channel")
+  local wroteConfig = writeVtxConfigFile(bandId, channelId, commandField.id)
+
   for i = 1, #fields do
     local sibling = fields[i]
     if sibling ~= commandField
@@ -477,8 +515,11 @@ local function fieldDryRunSave(field)
   if #lines == 1 then
     lines[#lines+1] = "No recent parameter payloads"
   end
+  if not wroteConfig then
+    lines[#lines+1] = "vtxConfig.cfg write failed"
+  end
 
-  local title = "[" .. (commandField.name or "command") .. "] dry run"
+  local title = "[" .. (commandField.name or "command") .. "] save config"
 
   fieldPopup = {
     dryRun = true,
@@ -493,7 +534,7 @@ local function fieldDryRunSave(field)
 end
 
 local function fieldDryRunDisplay(field, y, attr)
-  lcd.drawText(10, y, "[dry run]", attr + BOLD)
+  lcd.drawText(10, y, "[save config]", attr + BOLD)
 end
 
 local function drawDryRunPopupContent(popup)
@@ -952,8 +993,7 @@ local function runDevicePage(event)
           or 0
         local color = field.grey and COLOR_THEME_DISABLED or 0
         if field.type < 11 or field.type == 12 then -- if not folder, command, or back
-          local label = string.format("%d: %s", field.id or 0, field.name or "")
-          lcd.drawText(COL1, y * textSize + textYoffset, label, color)
+          lcd.drawText(COL1, y * textSize + textYoffset, field.name or "", color)
         end
         if functions[field.type+1].display then
           functions[field.type+1].display(field, y*textSize+textYoffset, attr, color)
