@@ -7,9 +7,9 @@ local handsetId = 0xEF
 local CENTER_FLAG = CENTER or 0
 
 -- Command constants, moist likely to change depending on your radio
-local BAND_COMMAND = 0x0E -- 0x0D for Boxer + Mafia
-local CHANNEL_COMMAND = 0x0F -- 0x0E for Boxer + Mafia
-local APPLY_COMMAND = 0x12 -- 0x11 for Boxer + Mafia
+local BAND_COMMAND = 0x0D -- 0x0D for Boxer + Mafia
+local CHANNEL_COMMAND = 0x0E -- 0x0E for Boxer + Mafia
+local APPLY_COMMAND = 0x11 -- 0x11 for Boxer + Mafia
 -- This is static as well, just put it here
 local APPLY_VALUE = 0x01
 
