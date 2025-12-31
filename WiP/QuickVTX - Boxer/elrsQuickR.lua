@@ -7,9 +7,12 @@ local handsetId = 0xEF
 local CENTER_FLAG = CENTER or 0
 
 -- Command constants, moist likely to change depending on your radio
-local BAND_COMMAND = 0x0D -- 0x0D for Boxer + Mafia
-local CHANNEL_COMMAND = 0x0E -- 0x0E for Boxer + Mafia
-local APPLY_COMMAND = 0x11 -- 0x11 for Boxer + Mafia
+local DEFAULT_BAND_COMMAND = 0x0D -- 0x0B for TX15 ELRS -- 0x0E for TX15+Mafia -- 0x0D for Boxer + Mafia
+local DEFAULT_CHANNEL_COMMAND = 0x0E -- 0x0C for TX15 ELRS -- 0x0F for TX15+Mafia -- 0x0E for Boxer + Mafia
+local DEFAULT_APPLY_COMMAND = 0x11 -- 0x0F for TX15 ELRS -- 0x12 for TX15+Mafia -- 0x11 for Boxer + Mafia
+local BAND_COMMAND = DEFAULT_BAND_COMMAND
+local CHANNEL_COMMAND = DEFAULT_CHANNEL_COMMAND
+local APPLY_COMMAND = DEFAULT_APPLY_COMMAND
 -- This is static as well, just put it here
 local APPLY_VALUE = 0x01
 
@@ -18,10 +21,10 @@ local bands = {
   { prefix = "A", value = 0x01 },
   { prefix = "B", value = 0x02 },
   { prefix = "E", value = 0x03 },
-  { prefix = "F", value = 0x04 }, 
+  { prefix = "F", value = 0x04 },
   { prefix = "R", value = 0x05 },
   { prefix = "L", value = 0x06 },
-  { prefix = "X", value = 0x07 }, 
+  { prefix = "X", value = 0x07 },
 }
 
 -- Switch automation configuration (set SWITCH_SOURCE to nil to disable)
@@ -67,38 +70,55 @@ local lastMessage
 local messageTimeout = 0
 local lastSwitchIndex
 
-local function parseNumber(value)
-  if not value then
-    return
+local function parseHexByte(text)
+  if not text then
+    return nil
   end
-  local hex = string.match(value, "0x([%x]+)")
-  if hex then
-    return tonumber(hex, 16)
+  local hex = string.match(text, "0x[%da-fA-F]+")
+  if not hex then
+    return nil
   end
-  return tonumber(value)
+  return tonumber(hex, 16)
 end
 
-local function readVtxConfig()
-  local file = io.open("vtxConfig.cfg", "r")
-  if not file then
+local function loadCommandOverrides()
+  local ok, file = pcall(io.open, "/SCRIPTS/TOOLS/vtxConfig.cfg", "r")
+  if not ok or not file then
+    ok, file = pcall(io.open, "vtxConfig.cfg", "r")
+  end
+  if not ok or not file then
     return
   end
-  for line in file:lines() do
-    local key, value = string.match(line, "^%s*([%w_]+)%s*:%s*(.+)%s*$")
-    if key and value then
-      local parsed = parseNumber(value)
-      if parsed then
-        if key == "Band" then
-          BAND_COMMAND = parsed
-        elseif key == "Channel" then
-          CHANNEL_COMMAND = parsed
-        elseif key == "Command" then
-          APPLY_COMMAND = parsed
-        end
-      end
+
+  local function applyLine(line)
+    local bandVal = string.match(line, "^%s*Band:%s*(.+)$")
+    if bandVal then
+      BAND_COMMAND = parseHexByte(bandVal) or BAND_COMMAND
+      return
+    end
+    local channelVal = string.match(line, "^%s*Channel:%s*(.+)$")
+    if channelVal then
+      CHANNEL_COMMAND = parseHexByte(channelVal) or CHANNEL_COMMAND
+      return
+    end
+    local applyVal = string.match(line, "^%s*Command:%s*(.+)$")
+    if applyVal then
+      APPLY_COMMAND = parseHexByte(applyVal) or APPLY_COMMAND
+      return
     end
   end
-  file:close()
+
+  while true do
+    local chunk = io.read(file, 128)
+    if not chunk or #chunk == 0 then
+      break
+    end
+    for line in string.gmatch(chunk, "([^\r\n]+)") do
+      applyLine(line)
+    end
+  end
+
+  io.close(file)
 end
 
 local function queueStep(label, command, value)
@@ -231,7 +251,7 @@ local function drawScreen()
 end
 
 local function init()
-  readVtxConfig()
+  loadCommandOverrides()
   drawScreen()
 end
 
