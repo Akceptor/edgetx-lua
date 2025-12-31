@@ -5,13 +5,10 @@
 local deviceId = 0xEE
 local handsetId = 0xEF
 
--- Command constants, moist likely to change depending on your radio
-local DEFAULT_BAND_COMMAND = 0x0C -- 0x0B for TX15 ELRS -- 0x0E for TX15+Mafia -- 0x0D for Boxer + Mafia
-local DEFAULT_CHANNEL_COMMAND = 0x0D --0x0C for TX15 ELRS -- 0x0F for TX15+Mafia -- 0x0E for Boxer + Mafia
-local DEFAULT_APPLY_COMMAND = 0x10 -- 0x0F for TX15 ELRS -- 0x12 for TX15+Mafia -- 0x11 for Boxer + Mafia
-local BAND_COMMAND = DEFAULT_BAND_COMMAND
-local CHANNEL_COMMAND = DEFAULT_CHANNEL_COMMAND
-local APPLY_COMMAND = DEFAULT_APPLY_COMMAND
+-- Command constants loaded from config
+local BAND_COMMAND
+local CHANNEL_COMMAND
+local APPLY_COMMAND
 -- This is static as well, just put it here
 local APPLY_VALUE = 0x01
 
@@ -84,10 +81,7 @@ local function loadCommandOverrides()
     file = io.open("/SCRIPTS/TOOLS/vtxConfig_auto.cfg", "r")
   end
   if not file then
-    file = io.open("vtxConfig.cfg", "r")
-  end
-  if not file then
-    return
+    return false
   end
 
   local function applyLine(line)
@@ -119,9 +113,8 @@ local function loadCommandOverrides()
   end
 
   io.close(file)
+  return true
 end
-
-loadCommandOverrides()
 
 -- Switch automation configuration (set SWITCH_SOURCE to nil to disable)
 local SWITCH_SOURCE = "sc" -- radio input name, e.g. "sc", "sd", "s1"
@@ -286,6 +279,11 @@ local function queueStep(label, command, value)
 end
 
 local function queueVtxSequence(opt)
+  if not BAND_COMMAND or not CHANNEL_COMMAND or not APPLY_COMMAND then
+    lastMessage = "Commands not configured"
+    messageTimeout = getTime() + 50
+    return
+  end
   commandQueue = {}
   local baseLabel = opt.name or "Preset"
   queueStep(baseLabel .. " band", BAND_COMMAND, opt.bandValue)
@@ -611,13 +609,47 @@ local function buildUi()
   refreshButtons()
 end
 
+local function buildErrorUi()
+  lvgl.clear()
+  ui.page = lvgl.page({
+    title = "Config not found!",
+    subtitle = "",
+    scrollable = false,
+    titleColor = ACTIVE_COLOR,
+    titleFont = DBLSIZE,
+  })
+
+  ui.page:label({
+    x = 0,
+    y = 60,
+    w = LCD_W,
+    h = 24,
+    font = MIDSIZE,
+    align = lvgl.ALIGN_CENTER,
+    text = "Please run setup wizard first",
+  })
+end
+
+local configMissing = false
+
 local function init()
+  if not loadCommandOverrides() then
+    configMissing = true
+    buildErrorUi()
+    return
+  end
   local defaultBandIdx = bandIndexFromPrefix(DEFAULT_BAND) or 1
   setSelection(defaultBandIdx, DEFAULT_CHANNEL, false)
   buildUi()
 end
 
 local function run(event, touchState)
+  if configMissing then
+    if event == EVT_VIRTUAL_EXIT then
+      return 1
+    end
+    return 0
+  end
   processQueue()
   handleSwitchPresets()
 
