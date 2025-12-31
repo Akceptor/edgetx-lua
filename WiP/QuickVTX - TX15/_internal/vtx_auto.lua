@@ -56,11 +56,14 @@ local function formatPayload(payload)
   if not payload then
     return ""
   end
-  local parts = {}
+  local out = ""
   for i = 1, #payload do
-    parts[#parts+1] = string.format("%02X", payload[i])
+    if i > 1 then
+      out = out .. " "
+    end
+    out = out .. string.format("%02X", payload[i])
   end
-  return table.concat(parts, " ")
+  return out
 end
 
 local function clonePayload(payload)
