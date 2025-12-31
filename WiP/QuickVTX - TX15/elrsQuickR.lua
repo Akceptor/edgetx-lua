@@ -1,25 +1,219 @@
 -- TNS|Quick VTX|TNE
 -- Minimal helper to send fixed VTX payload sequences for R2/R3
 
+-- Device constants, moist likely not to change
 local deviceId = 0xEE
 local handsetId = 0xEF
 local CENTER_FLAG = CENTER or 0
--- Adjust accordingly to your device
-local BAND_IDX = 0x0E
-local CHANNEL_IDX = 0x0F
-local APPLY_COMMAND = 0x12
+
+-- Command constants, moist likely to change depending on your radio
+local DEFAULT_BAND_COMMAND = 0x0C -- 0x0B for TX15 ELRS -- 0x0E for TX15+Mafia -- 0x0D for Boxer + Mafia
+local DEFAULT_CHANNEL_COMMAND = 0x0D --0x0C for TX15 ELRS -- 0x0F for TX15+Mafia -- 0x0E for Boxer + Mafia
+local DEFAULT_APPLY_COMMAND = 0x10 -- 0x0F for TX15 ELRS -- 0x12 for TX15+Mafia -- 0x11 for Boxer + Mafia
+local BAND_COMMAND = DEFAULT_BAND_COMMAND
+local CHANNEL_COMMAND = DEFAULT_CHANNEL_COMMAND
+local APPLY_COMMAND = DEFAULT_APPLY_COMMAND
+-- This is static as well, just put it here
 local APPLY_VALUE = 0x01
 
+-- Adjust values to match your VTX band mapping if needed
 local bands = {
+  { prefix = "A", value = 0x01 },
+  { prefix = "B", value = 0x02 },
+  { prefix = "E", value = 0x03 },
+  { prefix = "F", value = 0x04 },
   { prefix = "R", value = 0x05 },
   { prefix = "L", value = 0x06 },
   { prefix = "X", value = 0x07 },
 }
+local channelValues = { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 }
+
+local frequencies = {
+  A = {5865, 5845, 5825, 5805, 5785, 5765, 5745, 5725},
+  B = {5733, 5752, 5771, 5790, 5809, 5828, 5847, 5866},
+  E = {5705, 5685, 5665, 5645, 5885, 5905, 5925, 5945},
+  F = {5740, 5760, 5780, 5800, 5820, 5840, 5860, 5880},
+  R = {5658, 5695, 5732, 5769, 5806, 5843, 5880, 5917},
+  L = {5362, 5399, 5436, 5473, 5510, 5547, 5584, 5621},
+  X = {4990, 5020, 5050, 5080, 5110, 5140, 5170, 5200},
+}
+
+local function parseHexByte(text)
+  if not text then
+    return nil
+  end
+  local hex = string.match(text, "0x[%da-fA-F]+")
+  if not hex then
+    return nil
+  end
+  return tonumber(hex, 16)
+end
+
+local function bandValueFromPrefix(prefix)
+  for _, band in ipairs(bands) do
+    if band.prefix == prefix then
+      return band.value
+    end
+  end
+end
+
+local function parseSwitchOption(text)
+  if not text then
+    return nil
+  end
+  local prefix, channelText = string.match(text, "^%s*([A-Za-z])%s*(%d+)%s*$")
+  local channelNum = tonumber(channelText)
+  if not prefix or not channelNum then
+    return nil
+  end
+  prefix = string.upper(prefix)
+  local bandValue = bandValueFromPrefix(prefix)
+  local channelValue = channelValues[channelNum]
+  if not bandValue or not channelValue then
+    return nil
+  end
+  return {
+    name = string.format("%s%d", prefix, channelNum),
+    bandValue = bandValue,
+    channelValue = channelValue,
+  }
+end
+
+local function loadCommandOverrides()
+  local file = io.open("vtxConfig_auto.cfg", "r")
+  if not file then
+    file = io.open("/SCRIPTS/TOOLS/vtxConfig_auto.cfg", "r")
+  end
+  if not file then
+    file = io.open("vtxConfig.cfg", "r")
+  end
+  if not file then
+    return
+  end
+
+  local function applyLine(line)
+    local bandVal = string.match(line, "^%s*Band:%s*(.+)$")
+    if bandVal then
+      BAND_COMMAND = parseHexByte(bandVal) or BAND_COMMAND
+      return
+    end
+    local channelVal = string.match(line, "^%s*Channel:%s*(.+)$")
+    if channelVal then
+      CHANNEL_COMMAND = parseHexByte(channelVal) or CHANNEL_COMMAND
+      return
+    end
+    local applyVal = string.match(line, "^%s*Command:%s*(.+)$")
+    if applyVal then
+      APPLY_COMMAND = parseHexByte(applyVal) or APPLY_COMMAND
+      return
+    end
+  end
+
+  while true do
+    local chunk = io.read(file, 128)
+    if not chunk or #chunk == 0 then
+      break
+    end
+    for line in string.gmatch(chunk, "([^\r\n]+)") do
+      applyLine(line)
+    end
+  end
+
+  io.close(file)
+end
+
+loadCommandOverrides()
+
+-- Switch automation configuration (set SWITCH_SOURCE to nil to disable)
+local SWITCH_SOURCE = "sc" -- radio input name, e.g. "sc", "sd", "s1"
+local SWITCH_POSITIONS = {
+  { value = 1000,  bandValue = 0x05, channelValue = 0x01, name = "R1" }, -- switch fully up
+  { value = 0,     bandValue = 0x06, channelValue = 0x04, name = "L4" }, -- middle
+  { value = -1000, bandValue = 0x07, channelValue = 0x08, name = "X8" }, -- fully down
+}
+local SWITCH_TOLERANCE = 100 -- tolerance for matching switch positions, should be ok without changes
+
+local function roundValue(value)
+  if value >= 0 then
+    return math.floor(value + 0.5)
+  end
+  return math.ceil(value - 0.5)
+end
+
+local function loadSwitchOverrides()
+  local file = io.open("vtxConfig_auto.cfg", "r")
+  if not file then
+    file = io.open("/SCRIPTS/TOOLS/vtxConfig_auto.cfg", "r")
+  end
+  if not file then
+    return
+  end
+
+  local lines = {}
+  while true do
+    local chunk = io.read(file, 128)
+    if not chunk or #chunk == 0 then
+      break
+    end
+    for line in string.gmatch(chunk, "([^\r\n]+)") do
+      lines[#lines + 1] = line
+      if #lines >= 64 then
+        break
+      end
+    end
+    if #lines >= 64 then
+      break
+    end
+  end
+  io.close(file)
+
+  local positionsCount
+  local positionsMap = {}
+  for _, line in ipairs(lines) do
+    local switchVal = string.match(line, "^%s*Switch:%s*(.+)%s*$")
+    if switchVal then
+      switchVal = string.lower(switchVal)
+      SWITCH_SOURCE = (switchVal ~= "" and switchVal) or nil
+    end
+    local positionsVal = string.match(line, "^%s*Positions:%s*(.+)%s*$")
+    if positionsVal then
+      positionsCount = tonumber(positionsVal)
+    end
+    local posIndex, posValue = string.match(line, "^%s*Pos(%d+)%s*:%s*(.+)%s*$")
+    if posIndex and posValue then
+      positionsMap[tonumber(posIndex)] = posValue
+    end
+  end
+
+  local count = positionsCount or 0
+  if count < 1 then
+    count = #positionsMap
+  end
+  if count < 1 then
+    return
+  end
+
+  local step = (count > 1) and (2000 / (count - 1)) or 0
+  local overrides = {}
+  for i = 1, count do
+    local option = parseSwitchOption(positionsMap[i])
+    if option then
+      local value = (count == 1) and 0 or (1000 - (i - 1) * step)
+      option.value = roundValue(value)
+      overrides[#overrides + 1] = option
+    end
+  end
+
+  if #overrides > 0 then
+    SWITCH_POSITIONS = overrides
+  end
+end
+
+loadSwitchOverrides()
 
 local function generateOptions()
   local rows = {}
   local flat = {}
-  local channelValues = { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 }
 
   for bandIndex, band in ipairs(bands) do
     rows[bandIndex] = {}
@@ -28,6 +222,7 @@ local function generateOptions()
         name = string.format("%s%d", band.prefix, channelIndex),
         bandValue = band.value,
         channelValue = channelValues[channelIndex],
+        frequency = frequencies[band.prefix] and frequencies[band.prefix][channelIndex] or nil,
       }
       option.index = #flat + 1
       option.row = bandIndex
@@ -42,13 +237,38 @@ end
 
 local menuRows, options = generateOptions()
 
-
 local commandQueue = {}
 local QUEUE_DELAY_TICKS = 5 -- short delay (~0.05s) between queued commands
 
-local selection = 1
+local DEFAULT_BAND, DEFAULT_CHANNEL = "R", 3
 local lastMessage
 local messageTimeout = 0
+local lastSwitchIndex
+local selectedBandIndex = 1
+local selectedChannelIndex = DEFAULT_CHANNEL
+local refreshButtons
+local layout = {
+  margin = 10,
+  gap = 6,
+  btnH = 38,
+  bandY = 18,
+  rowGap = 12,
+  applyH = 40,
+}
+layout.chanY = layout.bandY + (layout.btnH + layout.gap) * 2 + layout.rowGap
+local ui = {
+  page = nil,
+  bandButtons = {},
+  channelButtons = {},
+  messageLabel = nil,
+  applyButton = nil,
+}
+local ACTIVE_COLOR = COLOR_THEME_PRIMARY1 or lcd.RGB(0, 180, 255)
+local INACTIVE_COLOR = COLOR_THEME_SECONDARY1 or lcd.RGB(70, 70, 70)
+local TEXT_COLOR = COLOR_THEME_PRIMARY3 or lcd.RGB(255, 255, 255)
+local SWITCH_COLOR = COLOR_THEME_PRIMARY2 or lcd.RGB(0, 170, 0)
+local SWITCH_TEXT_COLOR = COLOR_THEME_SECONDARY2 or TEXT_COLOR
+local switchDisplayMode = "name"
 
 local function queueStep(label, command, value)
   local due = getTime()
@@ -66,6 +286,92 @@ local function queueStep(label, command, value)
   }
 end
 
+local function queueVtxSequence(opt)
+  commandQueue = {}
+  local baseLabel = opt.name or "Preset"
+  queueStep(baseLabel .. " band", BAND_COMMAND, opt.bandValue)
+  queueStep(baseLabel .. " channel", CHANNEL_COMMAND, opt.channelValue)
+  queueStep("Apply", APPLY_COMMAND, APPLY_VALUE)
+  lastMessage = "Queued " .. baseLabel .. " sequence"
+  messageTimeout = getTime() + 50 -- ~0.5s
+end
+
+local function bandIndexFromValue(val)
+  for i, band in ipairs(bands) do
+    if band.value == val then
+      return i
+    end
+  end
+end
+
+local function bandIndexFromPrefix(prefix)
+  for i, band in ipairs(bands) do
+    if band.prefix == prefix then
+      return i
+    end
+  end
+end
+
+local function setSelection(bandIdx, channelIdx, shouldQueue)
+  if bandIdx then
+    selectedBandIndex = math.max(1, math.min(#bands, bandIdx))
+  end
+  if channelIdx then
+    selectedChannelIndex = math.max(1, math.min(8, channelIdx))
+  end
+  local opt = menuRows[selectedBandIndex] and menuRows[selectedBandIndex][selectedChannelIndex]
+  if opt then
+    if shouldQueue then
+      queueVtxSequence(opt)
+    end
+  end
+  if refreshButtons then
+    refreshButtons()
+  end
+end
+
+local function resolveSwitchPreset(value)
+  if type(value) ~= "number" then
+    return
+  end
+  for idx, preset in ipairs(SWITCH_POSITIONS) do
+    local tolerance = preset.tolerance or SWITCH_TOLERANCE
+    if math.abs(value - preset.value) <= tolerance then
+      return preset, idx
+    end
+  end
+end
+
+local function handleSwitchPresets()
+  if not SWITCH_SOURCE or #SWITCH_POSITIONS == 0 then
+    return
+  end
+  local raw = getValue(SWITCH_SOURCE)
+  if raw == nil then
+    return
+  end
+
+  local preset, idx = resolveSwitchPreset(raw)
+  if not preset or not preset.bandValue or not preset.channelValue then
+    lastSwitchIndex = nil
+    return
+  end
+
+  if idx ~= lastSwitchIndex then
+    lastSwitchIndex = idx
+    local opt = {
+      name = preset.name or string.format("%s#%d", SWITCH_SOURCE:upper(), idx),
+      bandValue = preset.bandValue,
+      channelValue = preset.channelValue,
+    }
+    local bandIdx = bandIndexFromValue(preset.bandValue)
+    if bandIdx then
+      setSelection(bandIdx, preset.channelValue, false)
+    end
+    queueVtxSequence(opt)
+  end
+end
+
 local function shiftQueue()
   if not commandQueue[1] then
     return
@@ -75,16 +381,6 @@ local function shiftQueue()
     commandQueue[i - 1] = commandQueue[i]
   end
   commandQueue[count] = nil
-end
-
-local function queueVtxSequence(opt)
-  commandQueue = {}
-  local baseLabel = opt.name or "Preset"
-  queueStep(baseLabel .. " band", BAND_IDX, opt.bandValue)
-  queueStep(baseLabel .. " channel", CHANNEL_IDX, opt.channelValue)
-  queueStep("Apply", APPLY_COMMAND, APPLY_VALUE)
-  lastMessage = "Queued " .. baseLabel .. " sequence"
-  messageTimeout = getTime() + 50 -- ~0.5s
 end
 
 local function processQueue()
@@ -107,73 +403,246 @@ local function processQueue()
   end
 end
 
-local function drawScreen()
-  lcd.clear()
-  lcd.drawText(10, 5, "Quick VTX presets", MIDSIZE)
-
-  local margin = 10
-  local maxCols = 0
-  for rowIndex = 1, #menuRows do
-    if #menuRows[rowIndex] > maxCols then
-      maxCols = #menuRows[rowIndex]
-    end
+local function changeChannel(step)
+  local newChannel = selectedChannelIndex + step
+  if newChannel < 1 then
+    newChannel = 8
+  elseif newChannel > 8 then
+    newChannel = 1
   end
+  setSelection(selectedBandIndex, newChannel, false)
+end
 
-  local availableWidth = math.max(1, LCD_W - (margin * 2))
-  local colWidth = math.max(14, math.floor(availableWidth / math.max(1, maxCols)))
-  local topY = 30
-  local availableHeight = math.max(0, LCD_H - topY - 40)
-  local lineSpacing = math.min(32, math.max(16, math.floor(availableHeight / math.max(1, #menuRows))))
-  local y = topY
-
-  for rowIndex = 1, #menuRows do
-    local row = menuRows[rowIndex]
-    for colIndex = 1, #row do
-      local opt = row[colIndex]
-      local attr = (opt.index == selection) and INVERS or 0
-      local centerX = margin + (colIndex - 0.5) * colWidth
-      lcd.drawText(centerX, y, opt.name, attr + CENTER_FLAG)
-    end
-    y = y + lineSpacing
+local function changeBand(step)
+  local newBand = selectedBandIndex + step
+  if newBand < 1 then
+    newBand = #bands
+  elseif newBand > #bands then
+    newBand = 1
   end
+  setSelection(newBand, selectedChannelIndex, false)
+end
 
+local function currentOption()
+  return menuRows[selectedBandIndex] and menuRows[selectedBandIndex][selectedChannelIndex]
+end
+
+local function freqText()
+  local band = bands[selectedBandIndex]
+  if not band then
+    return "Band/Channel not available"
+  end
+  local opt = currentOption()
+  if opt and opt.frequency then
+    return string.format("%s%d - %d MHz", band.prefix, selectedChannelIndex, opt.frequency)
+  elseif opt then
+    return string.format("%s%d - -- MHz", band.prefix, selectedChannelIndex)
+  end
+  return "Band/Channel not available"
+end
+
+local function switchButtonText()
+  if switchDisplayMode == "count" then
+    return tostring(#SWITCH_POSITIONS)
+  end
+  if not SWITCH_SOURCE then
+    return "--"
+  end
+  local base = string.format("[%s]", string.upper(SWITCH_SOURCE))
+  if lastSwitchIndex then
+    local preset = SWITCH_POSITIONS[lastSwitchIndex]
+    if preset and preset.name then
+      return base
+    end
+    return string.format("%s#%d", base, lastSwitchIndex)
+  end
+  return base
+end
+
+local function messageText()
   if lastMessage and getTime() < messageTimeout then
-    lcd.drawText(10, LCD_H - 20, lastMessage, 0)
+    return lastMessage
   end
+  return ""
+end
+
+refreshButtons = function()
+  for i, btn in ipairs(ui.bandButtons) do
+    if btn then
+      if ui.switchButton and btn == ui.switchButton then
+        btn:set({
+          color = SWITCH_COLOR,
+          textColor = SWITCH_TEXT_COLOR,
+        })
+      else
+        btn:set({
+          color = (i == selectedBandIndex) and ACTIVE_COLOR or INACTIVE_COLOR,
+          textColor = TEXT_COLOR,
+        })
+      end
+    end
+  end
+  for i, btn in ipairs(ui.channelButtons) do
+    if btn then
+      btn:set({
+        color = (i == selectedChannelIndex) and ACTIVE_COLOR or INACTIVE_COLOR,
+        textColor = TEXT_COLOR,
+      })
+    end
+  end
+  if ui.applyButton then
+    ui.applyButton:set({
+      text = freqText(),
+      color = ACTIVE_COLOR,
+      textColor = TEXT_COLOR,
+    })
+  end
+  if ui.switchButton then
+    ui.switchButton:set({ text = switchButtonText() })
+  end
+end
+
+local function buildUi()
+  lvgl.clear()
+  ui.page = lvgl.page({
+    title = "Quick VTX",
+    subtitle = "",
+    scrollable = false,
+    titleColor = ACTIVE_COLOR,
+    titleFont = DBLSIZE,
+  })
+
+  local margin = layout.margin
+  local gap = layout.gap
+  local btnH = layout.btnH
+  local bandY = layout.bandY
+  local chanY = layout.chanY
+
+  local function buttonWidth(count, cols)
+    local columns = cols or count
+    return math.max(60, math.floor((LCD_W - (margin * 2) - (columns - 1) * gap) / columns))
+  end
+
+  local function placeRow(items, cols, yStart, buttonsTable, onPress)
+    local perRow = cols
+    local btnW = buttonWidth(#items, perRow)
+    for i = 1, #items do
+      local c = ((i - 1) % perRow)
+      local r = math.floor((i - 1) / perRow)
+      local x = margin + c * (btnW + gap)
+      local y = yStart + r * (btnH + gap)
+      local pressHandler = items[i].press or function() onPress(i) end
+      buttonsTable[i] = ui.page:button({
+        x = x,
+        y = y,
+        w = btnW,
+        h = btnH,
+        text = items[i].text,
+        font = DBLSIZE,
+        color = INACTIVE_COLOR,
+        textColor = TEXT_COLOR,
+        press = pressHandler
+      })
+      if items[i].isSwitch then
+        ui.switchButton = buttonsTable[i]
+      end
+    end
+  end
+
+  local bandItems = {}
+  for i, b in ipairs(bands) do
+    bandItems[i] = { text = b.prefix }
+  end
+  bandItems[#bandItems + 1] = {
+    text = switchButtonText(),
+    isSwitch = true,
+    press = function()
+      if switchDisplayMode == "name" then
+        switchDisplayMode = "count"
+      else
+        switchDisplayMode = "name"
+      end
+      refreshButtons()
+    end,
+  }
+  placeRow(bandItems, 4, bandY, ui.bandButtons, function(idx)
+    setSelection(idx, nil, false)
+  end)
+
+  local chanItems = {}
+  for i = 1, 8 do
+    chanItems[i] = { text = tostring(i) }
+  end
+  placeRow(chanItems, 4, chanY, ui.channelButtons, function(idx)
+    setSelection(nil, idx, false)
+  end)
+
+  local applyY = chanY + (2 * (btnH + gap)) + 10
+  ui.applyButton = ui.page:button({
+    x = margin,
+    y = applyY,
+    w = LCD_W - (margin * 2),
+    h = layout.applyH,
+    text = freqText(),
+    font = MIDSIZE,
+    color = ACTIVE_COLOR,
+    textColor = TEXT_COLOR,
+    press = function()
+      local opt = currentOption()
+      if opt then
+        queueVtxSequence(opt)
+      else
+        lastMessage = "No band/channel selected"
+        messageTimeout = getTime() + 50
+      end
+    end
+  })
+
+  local messageY = applyY + layout.applyH + 4
+  ui.messageLabel = ui.page:label({
+    x = 0,
+    y = messageY,
+    w = LCD_W,
+    h = 12,
+    font = SMLSIZE,
+    align = lvgl.ALIGN_CENTER,
+    text = function() return messageText() end
+  })
+
+  refreshButtons()
 end
 
 local function init()
-  drawScreen()
+  local defaultBandIdx = bandIndexFromPrefix(DEFAULT_BAND) or 1
+  setSelection(defaultBandIdx, DEFAULT_CHANNEL, false)
+  buildUi()
 end
 
-local function run(event)
+local function run(event, touchState)
   processQueue()
+  handleSwitchPresets()
 
   if event == nil then
     return 2
   end
 
   if event == EVT_VIRTUAL_NEXT then
-    selection = selection + 1
-    if selection > #options then
-      selection = 1
-    end
+    changeChannel(1)
   elseif event == EVT_VIRTUAL_PREV then
-    selection = selection - 1
-    if selection < 1 then
-      selection = #options
-    end
+    changeChannel(-1)
   elseif event == EVT_VIRTUAL_ENTER then
-    local chosen = options[selection]
+    local chosen = menuRows[selectedBandIndex] and menuRows[selectedBandIndex][selectedChannelIndex]
     if chosen then
       queueVtxSequence(chosen)
     end
   elseif event == EVT_VIRTUAL_EXIT then
     return 1
+  elseif event == EVT_ROT_RIGHT then
+    changeBand(1)
+  elseif event == EVT_ROT_LEFT then
+    changeBand(-1)
   end
-
-  drawScreen()
   return 0
 end
 
-return { init = init, run = run }
+return { init = init, run = run, useLvgl = true }
