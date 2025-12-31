@@ -4,7 +4,6 @@
 -- Device constants, moist likely not to change
 local deviceId = 0xEE
 local handsetId = 0xEF
-local CENTER_FLAG = CENTER or 0
 
 -- Command constants, moist likely to change depending on your radio
 local DEFAULT_BAND_COMMAND = 0x0C -- 0x0B for TX15 ELRS -- 0x0E for TX15+Mafia -- 0x0D for Boxer + Mafia
