@@ -6,13 +6,10 @@ local deviceId = 0xEE
 local handsetId = 0xEF
 local CENTER_FLAG = CENTER or 0
 
--- Command constants, moist likely to change depending on your radio
-local DEFAULT_BAND_COMMAND = 0x0D -- 0x0B for TX15 ELRS -- 0x0E for TX15+Mafia -- 0x0D for Boxer + Mafia
-local DEFAULT_CHANNEL_COMMAND = 0x0E -- 0x0C for TX15 ELRS -- 0x0F for TX15+Mafia -- 0x0E for Boxer + Mafia
-local DEFAULT_APPLY_COMMAND = 0x11 -- 0x0F for TX15 ELRS -- 0x12 for TX15+Mafia -- 0x11 for Boxer + Mafia
-local BAND_COMMAND = DEFAULT_BAND_COMMAND
-local CHANNEL_COMMAND = DEFAULT_CHANNEL_COMMAND
-local APPLY_COMMAND = DEFAULT_APPLY_COMMAND
+-- Command constants loaded from config
+local BAND_COMMAND
+local CHANNEL_COMMAND
+local APPLY_COMMAND
 -- This is static as well, just put it here
 local APPLY_VALUE = 0x01
 
@@ -21,51 +18,36 @@ local bands = {
   { prefix = "A", value = 0x01 },
   { prefix = "B", value = 0x02 },
   { prefix = "E", value = 0x03 },
-  { prefix = "F", value = 0x04 },
+  { prefix = "F", value = 0x04 }, 
   { prefix = "R", value = 0x05 },
   { prefix = "L", value = 0x06 },
-  { prefix = "X", value = 0x07 },
+  { prefix = "X", value = 0x07 }, 
 }
+local channelValues = { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 }
 
 -- Switch automation configuration (set SWITCH_SOURCE to nil to disable)
-local SWITCH_SOURCE = "sc" -- radio input name, e.g. "sc", "sd", "s1"
-local SWITCH_POSITIONS = {
-  { value = 1000,  bandValue = 0x05, channelValue = 0x01, name = "R1" }, -- switch fully up
-  { value = 0,     bandValue = 0x06, channelValue = 0x04, name = "L4" }, -- middle
-  { value = -1000, bandValue = 0x07, channelValue = 0x08, name = "X8" }, -- fully down
-}
+local SWITCH_SOURCE = nil -- radio input name, e.g. "sc", "sd", "s1"
+local SWITCH_POSITIONS = {}
 local SWITCH_TOLERANCE = 100 -- tolerance for matching switch positions, should be ok without changes
 
-local function generateOptions()
-  local rows = {}
-  local flat = {}
-  local channelValues = { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 }
-
-  for bandIndex, band in ipairs(bands) do
-    rows[bandIndex] = {}
-    for channelIndex = 1, #channelValues do
-      local option = {
-        name = string.format("%s%d", band.prefix, channelIndex),
-        bandValue = band.value,
-        channelValue = channelValues[channelIndex],
-      }
-      option.index = #flat + 1
-      option.row = bandIndex
-      option.col = channelIndex
-      rows[bandIndex][channelIndex] = option
-      flat[#flat + 1] = option
-    end
-  end
-
-  return rows, flat
-end
-
-local menuRows, options = generateOptions()
+local frequencies = {
+  A = {5865, 5845, 5825, 5805, 5785, 5765, 5745, 5725},
+  B = {5733, 5752, 5771, 5790, 5809, 5828, 5847, 5866},
+  E = {5705, 5685, 5665, 5645, 5885, 5905, 5925, 5945},
+  F = {5740, 5760, 5780, 5800, 5820, 5840, 5860, 5880},
+  R = {5658, 5695, 5732, 5769, 5806, 5843, 5880, 5917},
+  L = {5362, 5399, 5436, 5473, 5510, 5547, 5584, 5621},
+  X = {4990, 5020, 5050, 5080, 5110, 5140, 5170, 5200},
+}
 
 local commandQueue = {}
 local QUEUE_DELAY_TICKS = 5 -- short delay (~0.05s) between queued commands
 
-local selection = 1
+local selectedBandIndex = 1
+local selectedChannelIndex = 1
+local focusRow = 1 -- 1=band, 2=channel, 3=apply
+local bandRowIndex = 1
+local switchDisplayMode = "name"
 local lastMessage
 local messageTimeout = 0
 local lastSwitchIndex
@@ -75,50 +57,175 @@ local function parseHexByte(text)
     return nil
   end
   local hex = string.match(text, "0x[%da-fA-F]+")
-  if not hex then
+  if hex then
+    return tonumber(string.sub(hex, 3), 16)
+  end
+  local hexRaw = string.match(text, "^[%da-fA-F]+$")
+  if hexRaw then
+    return tonumber(hexRaw, 16)
+  end
+  return tonumber(text)
+end
+
+local function bandValueFromPrefix(prefix)
+  for _, band in ipairs(bands) do
+    if band.prefix == prefix then
+      return band.value
+    end
+  end
+end
+
+local function bandIndexFromValue(value)
+  for i, band in ipairs(bands) do
+    if band.value == value then
+      return i
+    end
+  end
+end
+
+local function channelIndexFromValue(value)
+  for i, chan in ipairs(channelValues) do
+    if chan == value then
+      return i
+    end
+  end
+end
+
+local function parseSwitchOption(text)
+  if not text then
     return nil
   end
-  return tonumber(hex, 16)
+  local prefix, channelText = string.match(text, "^%s*([A-Za-z])%s*(%d+)%s*$")
+  local channelNum = tonumber(channelText)
+  if not prefix or not channelNum then
+    return nil
+  end
+  prefix = string.upper(prefix)
+  local bandValue = bandValueFromPrefix(prefix)
+  local channelValue = channelValues[channelNum]
+  if not bandValue or not channelValue then
+    return nil
+  end
+  return {
+    name = string.format("%s%d", prefix, channelNum),
+    bandValue = bandValue,
+    channelValue = channelValue,
+  }
 end
 
 local function loadCommandOverrides()
-  local ok, file = pcall(io.open, "/SCRIPTS/TOOLS/vtxConfig.cfg", "r")
-  if not ok or not file then
-    ok, file = pcall(io.open, "vtxConfig.cfg", "r")
+  local file = io.open("vtxConfig_auto.cfg", "r")
+  if not file then
+    file = io.open("/SCRIPTS/TOOLS/vtxConfig_auto.cfg", "r")
   end
-  if not ok or not file then
-    return
-  end
-
-  local function applyLine(line)
-    local bandVal = string.match(line, "^%s*Band:%s*(.+)$")
-    if bandVal then
-      BAND_COMMAND = parseHexByte(bandVal) or BAND_COMMAND
-      return
-    end
-    local channelVal = string.match(line, "^%s*Channel:%s*(.+)$")
-    if channelVal then
-      CHANNEL_COMMAND = parseHexByte(channelVal) or CHANNEL_COMMAND
-      return
-    end
-    local applyVal = string.match(line, "^%s*Command:%s*(.+)$")
-    if applyVal then
-      APPLY_COMMAND = parseHexByte(applyVal) or APPLY_COMMAND
-      return
-    end
+  if not file then
+    return false
   end
 
-  while true do
+  local lines = {}
+  local maxLines = 12
+  while #lines < maxLines do
     local chunk = io.read(file, 128)
     if not chunk or #chunk == 0 then
       break
     end
     for line in string.gmatch(chunk, "([^\r\n]+)") do
-      applyLine(line)
+      lines[#lines + 1] = line
+      if #lines >= maxLines then
+        break
+      end
+    end
+  end
+  io.close(file)
+
+  local function stripPrefix(line, label)
+    if not line then
+      return nil
+    end
+    local pattern = "^%s*" .. label .. "%s*:%s*(.+)%s*$"
+    return string.match(line, pattern)
+  end
+
+  local bandVal = stripPrefix(lines[1], "Band")
+  local channelVal = stripPrefix(lines[2], "Channel")
+  local applyVal = stripPrefix(lines[3], "Command")
+  BAND_COMMAND = parseHexByte(bandVal) or BAND_COMMAND
+  CHANNEL_COMMAND = parseHexByte(channelVal) or CHANNEL_COMMAND
+  APPLY_COMMAND = parseHexByte(applyVal) or APPLY_COMMAND
+  return true
+end
+
+local function roundValue(value)
+  if value >= 0 then
+    return math.floor(value + 0.5)
+  end
+  return math.ceil(value - 0.5)
+end
+
+local function loadSwitchOverrides()
+  local file = io.open("vtxConfig_auto.cfg", "r")
+  if not file then
+    file = io.open("/SCRIPTS/TOOLS/vtxConfig_auto.cfg", "r")
+  end
+  if not file then
+    return
+  end
+
+  local lines = {}
+  while #lines < 64 do
+    local chunk = io.read(file, 128)
+    if not chunk or #chunk == 0 then
+      break
+    end
+    for line in string.gmatch(chunk, "([^\r\n]+)") do
+      lines[#lines + 1] = line
+      if #lines >= 64 then
+        break
+      end
+    end
+  end
+  io.close(file)
+
+  local positionsCount
+  local positionsMap = {}
+  for _, line in ipairs(lines) do
+    local switchVal = string.match(line, "^%s*Switch:%s*(.+)%s*$")
+    if switchVal then
+      switchVal = string.lower(switchVal)
+      SWITCH_SOURCE = (switchVal ~= "" and switchVal) or nil
+    end
+    local positionsVal = string.match(line, "^%s*Positions:%s*(.+)%s*$")
+    if positionsVal then
+      positionsCount = tonumber(positionsVal)
+    end
+    local posIndex, posValue = string.match(line, "^%s*Pos(%d+)%s*:%s*(.+)%s*$")
+    if posIndex and posValue then
+      positionsMap[tonumber(posIndex)] = posValue
     end
   end
 
-  io.close(file)
+  local count = positionsCount or 0
+  if count < 1 then
+    count = #positionsMap
+  end
+  if count < 1 then
+    return
+  end
+
+  local step = (count > 1) and (2000 / (count - 1)) or 0
+  local overrides = {}
+  for i = 1, count do
+    local option = parseSwitchOption(positionsMap[i])
+    if option then
+      local value = (count == 1) and 0 or (1000 - (i - 1) * step)
+      option.value = roundValue(value)
+      overrides[#overrides + 1] = option
+    end
+  end
+
+  if #overrides > 0 then
+    SWITCH_POSITIONS = overrides
+  end
 end
 
 local function queueStep(label, command, value)
@@ -138,6 +245,11 @@ local function queueStep(label, command, value)
 end
 
 local function queueVtxSequence(opt)
+  if not BAND_COMMAND or not CHANNEL_COMMAND or not APPLY_COMMAND then
+    lastMessage = "Commands not configured"
+    messageTimeout = getTime() + 50
+    return
+  end
   commandQueue = {}
   local baseLabel = opt.name or "Preset"
   queueStep(baseLabel .. " band", BAND_COMMAND, opt.bandValue)
@@ -176,6 +288,17 @@ local function handleSwitchPresets()
 
   if idx ~= lastSwitchIndex then
     lastSwitchIndex = idx
+    local bandIdx = bandIndexFromValue(preset.bandValue)
+    local channelIdx = channelIndexFromValue(preset.channelValue)
+    if bandIdx then
+      selectedBandIndex = bandIdx
+      if bandRowIndex <= #bands then
+        bandRowIndex = bandIdx
+      end
+    end
+    if channelIdx then
+      selectedChannelIndex = channelIdx
+    end
     queueVtxSequence({
       name = preset.name or string.format("%s#%d", SWITCH_SOURCE:upper(), idx),
       bandValue = preset.bandValue,
@@ -215,43 +338,85 @@ local function processQueue()
   end
 end
 
+local function currentOption()
+  local band = bands[selectedBandIndex]
+  if not band then
+    return nil
+  end
+  local channelValue = channelValues[selectedChannelIndex]
+  if not channelValue then
+    return nil
+  end
+  local frequency = frequencies[band.prefix] and frequencies[band.prefix][selectedChannelIndex] or nil
+  return {
+    name = string.format("%s%d", band.prefix, selectedChannelIndex),
+    bandValue = band.value,
+    channelValue = channelValue,
+    frequency = frequency,
+  }
+end
+
+local function freqText()
+  local opt = currentOption()
+  if not opt then
+    return "Apply: --"
+  end
+  if opt.frequency then
+    return string.format("Apply: %s - %d", opt.name, opt.frequency)
+  end
+  return string.format("Apply: %s - --", opt.name)
+end
+
+local function switchButtonText()
+  if switchDisplayMode == "count" then
+    return tostring(#SWITCH_POSITIONS)
+  end
+  if not SWITCH_SOURCE then
+    return "--"
+  end
+  return string.upper(SWITCH_SOURCE)
+end
+
+local function drawRow(items, selectedIndex, y, columns, isFocused, forceInvertIndex)
+  local margin = 6
+  local availableWidth = math.max(1, LCD_W - (margin * 2))
+  local colWidth = math.max(14, math.floor(availableWidth / math.max(1, columns)))
+  for i = 1, #items do
+    local attr = (isFocused and i == selectedIndex) and INVERS or 0
+    if forceInvertIndex and i == forceInvertIndex then
+      attr = INVERS
+    end
+    local centerX = margin + (i - 0.5) * colWidth
+    lcd.drawText(centerX, y, items[i], attr + CENTER_FLAG)
+  end
+end
+
 local function drawScreen()
   lcd.clear()
 
-  local margin = 10
-  local maxCols = 0
-  for rowIndex = 1, #menuRows do
-    if #menuRows[rowIndex] > maxCols then
-      maxCols = #menuRows[rowIndex]
-    end
+  local bandItems = {}
+  for i, band in ipairs(bands) do
+    bandItems[i] = band.prefix
+  end
+  bandItems[#bandItems + 1] = switchButtonText()
+  local channelItems = {}
+  for i = 1, #channelValues do
+    channelItems[i] = tostring(i)
   end
 
-  local availableWidth = math.max(1, LCD_W - (margin * 2))
-  local colWidth = math.max(14, math.floor(availableWidth / math.max(1, maxCols)))
-  local topY = 0
-  local bottomReserve = 20
-  local availableHeight = math.max(0, LCD_H - topY - bottomReserve)
-  local lineSpacing = math.max(11, math.floor(availableHeight / math.max(1, #menuRows)) - 1)
-  local y = topY
-
-  for rowIndex = 1, #menuRows do
-    local row = menuRows[rowIndex]
-    for colIndex = 1, #row do
-      local opt = row[colIndex]
-      local attr = (opt.index == selection) and INVERS or 0
-      local centerX = margin + (colIndex - 0.5) * colWidth
-      lcd.drawText(centerX, y, opt.name, attr + CENTER_FLAG)
-    end
-    y = y + lineSpacing
-  end
+  drawRow(bandItems, bandRowIndex, 0, #bandItems, focusRow == 1, #bandItems)
+  drawRow(channelItems, selectedChannelIndex, 14, #channelItems, focusRow == 2)
+  local applyAttr = INVERS + CENTER_FLAG
+  lcd.drawText(math.floor(LCD_W / 2), 28, freqText(), applyAttr)
 
   if lastMessage and getTime() < messageTimeout then
-    lcd.drawText(10, LCD_H - 20, lastMessage, 0)
+    lcd.drawText(2, LCD_H - 12, lastMessage, 0)
   end
 end
 
 local function init()
   loadCommandOverrides()
+  loadSwitchOverrides()
   drawScreen()
 end
 
@@ -263,23 +428,61 @@ local function run(event)
     return 2
   end
 
-  if event == EVT_VIRTUAL_NEXT then
-    selection = selection + 1
-    if selection > #options then
-      selection = 1
+  if event == EVT_PAGEDN_FIRST then
+    focusRow = focusRow + 1
+    if focusRow > 3 then
+      focusRow = 1
     end
-  elseif event == EVT_VIRTUAL_PREV then
-    selection = selection - 1
-    if selection < 1 then
-      selection = #options
+  elseif event == EVT_PAGEUP_FIRST then
+    focusRow = focusRow - 1
+    if focusRow < 1 then
+      focusRow = 3
     end
   elseif event == EVT_VIRTUAL_ENTER then
-    local chosen = options[selection]
-    if chosen then
-      queueVtxSequence(chosen)
+    if focusRow == 1 and bandRowIndex == (#bands + 1) then
+      if switchDisplayMode == "name" then
+        switchDisplayMode = "count"
+      else
+        switchDisplayMode = "name"
+      end
+    elseif focusRow == 3 then
+      local chosen = currentOption()
+      if chosen then
+        queueVtxSequence(chosen)
+      end
     end
   elseif event == EVT_VIRTUAL_EXIT then
     return 1
+  elseif event == EVT_ROT_RIGHT then
+    if focusRow == 1 then
+      bandRowIndex = bandRowIndex + 1
+      if bandRowIndex > (#bands + 1) then
+        bandRowIndex = 1
+      end
+      if bandRowIndex <= #bands then
+        selectedBandIndex = bandRowIndex
+      end
+    elseif focusRow == 2 then
+      selectedChannelIndex = selectedChannelIndex + 1
+      if selectedChannelIndex > #channelValues then
+        selectedChannelIndex = 1
+      end
+    end
+  elseif event == EVT_ROT_LEFT then
+    if focusRow == 1 then
+      bandRowIndex = bandRowIndex - 1
+      if bandRowIndex < 1 then
+        bandRowIndex = #bands + 1
+      end
+      if bandRowIndex <= #bands then
+        selectedBandIndex = bandRowIndex
+      end
+    elseif focusRow == 2 then
+      selectedChannelIndex = selectedChannelIndex - 1
+      if selectedChannelIndex < 1 then
+        selectedChannelIndex = #channelValues
+      end
+    end
   end
 
   drawScreen()
