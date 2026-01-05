@@ -17,6 +17,28 @@ local channelIndex = 1
 local posIndex = 1
 local posSelections = {}
 local posField = "band"
+local deviceIdHash = nil
+
+local function parseHexByte(text)
+  if not text then
+    return nil
+  end
+  local hex = string.match(text, "0x[%da-fA-F]+")
+  if not hex then
+    return nil
+  end
+  return tonumber(hex, 16)
+end
+
+local function computeDeviceIdHash(commandId)
+  local ver, radio, maj, minor, rev, osname = getVersion()
+  local input = (ver or "") .. "|" .. (radio or "") .. "|" .. (osname or "") .. "|" .. tostring(commandId or "")
+  local hash = 5381
+  for i = 1, #input do
+    hash = (hash * 33 + string.byte(input, i)) % 4294967296
+  end
+  return string.format("%08X", hash)
+end
 
 local function isPageNext(event)
   return event == EVT_PAGEDN_FIRST
@@ -65,6 +87,53 @@ local function readCfgLines()
     lines[#lines + 1] = line
   end
   return lines
+end
+
+local function readCfgValue(key)
+  local file = io.open(cfgPath, "r")
+  if not file then
+    file = io.open("/SCRIPTS/TOOLS/" .. cfgPath, "r")
+  end
+  if not file then
+    return nil
+  end
+
+  local value = nil
+  while true do
+    local chunk = io.read(file, 128)
+    if not chunk or #chunk == 0 then
+      break
+    end
+    for line in string.gmatch(chunk, "([^\r\n]+)") do
+      local match = string.match(line, "^%s*" .. key .. ":%s*(.+)$")
+      if match then
+        value = match
+        break
+      end
+    end
+    if value then
+      break
+    end
+  end
+  io.close(file)
+  return value
+end
+
+local function getDeviceIdHash()
+  if deviceIdHash then
+    return deviceIdHash
+  end
+  local commandText = readCfgValue("Command")
+  local commandId = parseHexByte(commandText) or (commandText and tonumber(commandText) or nil)
+  if not commandId then
+    local hex = commandText and string.match(commandText, "^0x([%x]+)$") or nil
+    commandId = hex and tonumber(hex, 16) or nil
+  end
+  if not commandId then
+    return nil
+  end
+  deviceIdHash = computeDeviceIdHash(commandId)
+  return deviceIdHash
 end
 
 local function appendCfgLine(line)
@@ -183,8 +252,13 @@ local function run(event, touchState)
 
     if done then
       lcd.clear()
-    lcd.drawText(2, 2, "VTX Admin initialized")
-    lcd.drawText(2, 16, "Press PAGE> to continue")
+      local hash = getDeviceIdHash()
+      if hash then
+        lcd.drawText(2, 2, "Licensing device ID = " .. hash)
+      else
+        lcd.drawText(2, 2, "Licensing device ID = N/A")
+      end
+      lcd.drawText(2, 16, "Press PAGE> to continue")
       if isPageNext(event) then
         page = 1
       end
