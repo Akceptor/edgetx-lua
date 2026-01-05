@@ -6,11 +6,152 @@ local positions = {}
 local errorMsg = nil
 local loaded = false
 local debugLines = nil
+local licenseInfo = nil
+
+local function parseHexByte(text)
+  if not text then
+    return nil
+  end
+  local hex = string.match(text, "0x[%da-fA-F]+")
+  if not hex then
+    return nil
+  end
+  return tonumber(hex, 16)
+end
+
+local function computeDeviceIdHash(commandId)
+  local ver, radio, maj, minor, rev, osname = getVersion()
+  local input = (ver or "") .. "|" .. (radio or "") .. "|" .. (osname or "") .. "|" .. tostring(commandId or "")
+  local hash = 5381
+  for i = 1, #input do
+    hash = (hash * 33 + string.byte(input, i)) % 4294967296
+  end
+  return string.format("%08X", hash)
+end
+
+local function normalizeDeviceId(deviceId)
+  return string.upper(string.gsub(deviceId or "", "^%s*(.-)%s*$", "%1"))
+end
+
+local function normalizeEmail(email)
+  return string.lower(string.gsub(email or "", "^%s*(.-)%s*$", "%1"))
+end
+
+local function normalizeHex(text)
+  local hex = string.match(text or "", "0x([%da-fA-F]+)")
+  if not hex then
+    hex = string.match(text or "", "([%da-fA-F]+)")
+  end
+  if not hex then
+    return ""
+  end
+  return string.upper(hex)
+end
+
+local function computeLicense(deviceId, email)
+  local input = normalizeDeviceId(deviceId) .. "|" .. normalizeEmail(email)
+  local hash = 5381
+  if bit32 then
+    for i = 1, #input do
+      hash = bit32.band(bit32.lshift(hash, 5) + hash + string.byte(input, i), 0xFFFFFFFF)
+    end
+  else
+    for i = 1, #input do
+      hash = (hash * 33 + string.byte(input, i)) % 4294967296
+    end
+  end
+  return string.format("%08X", hash)
+end
+
+local function buildLicenseInput(deviceId, email)
+  return normalizeDeviceId(deviceId) .. "|" .. normalizeEmail(email)
+end
+
+local function lastByte(text)
+  if not text or #text == 0 then
+    return nil
+  end
+  return string.byte(text, #text)
+end
+
+local function hexTail(text, count)
+  if not text then
+    return ""
+  end
+  local len = #text
+  local start = len - (count or 8) + 1
+  if start < 1 then
+    start = 1
+  end
+  local parts = {}
+  for i = start, len do
+    parts[#parts + 1] = string.format("%02X", string.byte(text, i))
+  end
+  return table.concat(parts, "")
+end
+
+local function hexHead(text, count)
+  if not text then
+    return ""
+  end
+  local len = #text
+  local last = count or 8
+  if last > len then
+    last = len
+  end
+  local parts = {}
+  for i = 1, last do
+    parts[#parts + 1] = string.format("%02X", string.byte(text, i))
+  end
+  return table.concat(parts, "")
+end
+
+local function readFileLines(path)
+  local file = io.open(path, "r")
+  if not file then
+    return nil
+  end
+  local lines = {}
+  local pending = ""
+  while true do
+    local chunk = io.read(file, 128)
+    if not chunk or #chunk == 0 then
+      break
+    end
+    local text = pending .. chunk
+    local start = 1
+    while true do
+      local i, j = string.find(text, "[\r\n]", start)
+      if not i then
+        break
+      end
+      local line = string.sub(text, start, i - 1)
+      if line ~= "" then
+        lines[#lines + 1] = line
+      end
+      start = j + 1
+      while start <= #text do
+        local c = string.sub(text, start, start)
+        if c ~= "\r" and c ~= "\n" then
+          break
+        end
+        start = start + 1
+      end
+    end
+    pending = string.sub(text, start)
+  end
+  if pending ~= "" then
+    lines[#lines + 1] = pending
+  end
+  io.close(file)
+  return lines
+end
 
 local function loadConfig()
   values = {}
   positions = {}
   debugLines = nil
+  licenseInfo = nil
   local ok, file = pcall(io.open, cfgPath, "r")
   if not ok or not file then
     ok, file = pcall(io.open, cfgPathFallback, "r")
@@ -40,7 +181,7 @@ local function loadConfig()
     if not line then
       return nil
     end
-    local pattern = "^%s*" .. label .. "%s*:%s*(.+)%s*$"
+    local pattern = "^%s*" .. label .. "%s*[:=]%s*(.+)%s*$"
     return string.match(line, pattern)
   end
 
@@ -62,6 +203,67 @@ local function loadConfig()
     if pos and pos ~= "" then
       positions[#positions + 1] = pos
     end
+  end
+
+  local commandId = parseHexByte(values["Command"]) or (values["Command"] and tonumber(values["Command"]) or nil)
+  if commandId then
+    local deviceHash = computeDeviceIdHash(commandId)
+    local licenseName = "license_" .. deviceHash .. ".txt"
+    local licenseLines = readFileLines(licenseName)
+    if not licenseLines then
+      licenseLines = readFileLines("/SCRIPTS/TOOLS/" .. licenseName)
+    end
+    if licenseLines then
+
+      local deviceId = nil
+      local email = nil
+      local licenseVal = nil
+      for i = 1, #licenseLines do
+        deviceId = deviceId or stripPrefix(licenseLines[i], "DEVICEID")
+        email = email or stripPrefix(licenseLines[i], "EMAIL")
+        licenseVal = licenseVal or stripPrefix(licenseLines[i], "LICENSE")
+      end
+
+      local expectedDeviceId = deviceHash
+      local licenseInput = (deviceId and email) and buildLicenseInput(deviceId, email) or nil
+      local expectedLicense = licenseInput and computeLicense(deviceId, email) or nil
+      local deviceMatch = deviceId and normalizeHex(deviceId) == normalizeHex(expectedDeviceId)
+      local licenseMatch = expectedLicense and licenseVal and normalizeHex(licenseVal) == normalizeHex(expectedLicense)
+
+      if deviceMatch and licenseMatch then
+        licenseInfo = {
+          status = "OK",
+          deviceId = deviceId,
+          email = email,
+          license = licenseVal,
+          expectedDeviceId = expectedDeviceId,
+          expectedLicense = expectedLicense,
+          inputLen = licenseInput and #licenseInput or 0,
+          inputLast = lastByte(licenseInput),
+        }
+      else
+        local reason = "Invalid"
+        if not deviceMatch then
+          reason = "Device ID mismatch"
+        elseif not licenseMatch then
+          reason = "License mismatch"
+        end
+        licenseInfo = {
+          status = reason,
+          deviceId = deviceId,
+          email = email,
+          license = licenseVal,
+          expectedDeviceId = expectedDeviceId,
+          expectedLicense = expectedLicense,
+          inputLen = licenseInput and #licenseInput or 0,
+          inputLast = lastByte(licenseInput),
+        }
+      end
+    else
+      licenseInfo = { status = "Missing", deviceId = deviceHash, expectedDeviceId = deviceHash }
+    end
+  else
+    licenseInfo = { status = "Command missing" }
   end
 
   loaded = true
@@ -88,12 +290,20 @@ local function draw()
     return
   end
 
-  drawTextLine(2, "Band Command: ", values["Band"])
-  drawTextLine(14, "Channel Command: ", values["Channel"])
-  drawTextLine(26, "Switch Name: ", values["Switch"])
-  drawTextLine(38, "Switch Positions: ", values["Positions"])
-  if #positions > 0 then
-    drawTextLine(50, "Positions: ", table.concat(positions, ", "))
+  if licenseInfo and licenseInfo.status then
+    drawTextLine(2, "Device ID: ", licenseInfo.deviceId)
+    drawTextLine(16, "Email: ", licenseInfo.email)
+    drawTextLine(30, "License: ", licenseInfo.license)
+    drawTextLine(44, "Expect Lic: ", licenseInfo.expectedLicense)
+    drawTextLine(58, "Status: ", licenseInfo.status)
+  else
+    drawTextLine(2, "Band Command: ", values["Band"])
+    drawTextLine(16, "Channel Command: ", values["Channel"])
+    drawTextLine(30, "Switch Name: ", values["Switch"])
+    drawTextLine(44, "Switch Positions: ", values["Positions"])
+    if #positions > 0 then
+      drawTextLine(58, "Positions: ", table.concat(positions, ", "))
+    end
   end
 end
 
