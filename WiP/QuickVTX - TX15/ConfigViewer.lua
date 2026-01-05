@@ -1,6 +1,7 @@
 -- TNS|Config Viewer|TNE
-local cfgPath = "vtxConfig_auto.cfg"
-local cfgPathFallback = "/SCRIPTS/TOOLS/vtxConfig_auto.cfg"
+local cfgPathLegacy = "vtxConfig_auto.cfg"
+local cfgPathLegacyFallback = "/SCRIPTS/TOOLS/vtxConfig_auto.cfg"
+local cfgPathTemplate = "vtxConfig_%s.cfg"
 local values = {}
 local positions = {}
 local errorMsg = nil
@@ -23,10 +24,23 @@ local function computeDeviceIdHash(commandId)
   local ver, radio, maj, minor, rev, osname = getVersion()
   local input = (ver or "") .. "|" .. (radio or "") .. "|" .. (osname or "") .. "|" .. tostring(commandId or "")
   local hash = 5381
-  for i = 1, #input do
-    hash = (hash * 33 + string.byte(input, i)) % 4294967296
+  if bit32 then
+    for i = 1, #input do
+      hash = bit32.band(bit32.lshift(hash, 5) + hash + string.byte(input, i), 0xFFFFFFFF)
+    end
+  else
+    for i = 1, #input do
+      hash = (hash * 33 + string.byte(input, i)) % 4294967296
+    end
   end
   return string.format("%08X", hash)
+end
+
+local function cfgPathForHash(hash)
+  if not hash or hash == "" then
+    return nil
+  end
+  return string.format(cfgPathTemplate, hash)
 end
 
 local function normalizeDeviceId(deviceId)
@@ -152,30 +166,14 @@ local function loadConfig()
   positions = {}
   debugLines = nil
   licenseInfo = nil
-  local ok, file = pcall(io.open, cfgPath, "r")
-  if not ok or not file then
-    ok, file = pcall(io.open, cfgPathFallback, "r")
+  local lines = readFileLines(cfgPathLegacy)
+  if not lines then
+    lines = readFileLines(cfgPathLegacyFallback)
   end
-  if not ok or not file then
-    errorMsg = "vtxConfig_auto.cfg not found"
+  if not lines then
+    errorMsg = "vtxConfig not found"
     return
   end
-
-  local lines = {}
-  local maxLines = 20
-  while #lines < maxLines do
-    local chunk = io.read(file, 128)
-    if not chunk or #chunk == 0 then
-      break
-    end
-    for line in string.gmatch(chunk, "([^\r\n]+)") do
-      lines[#lines + 1] = line
-      if #lines >= maxLines then
-        break
-      end
-    end
-  end
-  io.close(file)
 
   local function stripPrefix(line, label)
     if not line then
@@ -185,27 +183,60 @@ local function loadConfig()
     return string.match(line, pattern)
   end
 
-  values["Band"] = stripPrefix(lines[1], "Band")
-  values["Channel"] = stripPrefix(lines[2], "Channel")
-  values["Command"] = stripPrefix(lines[3], "Command")
-  values["Switch"] = stripPrefix(lines[4], "Switch")
-  values["Positions"] = stripPrefix(lines[5], "Positions")
+  local function findValue(linesList, label)
+    for i = 1, #linesList do
+      local value = stripPrefix(linesList[i], label)
+      if value then
+        return value
+      end
+    end
+    return nil
+  end
+
+  local commandVal = findValue(lines, "Command")
+  local commandId = parseHexByte(commandVal) or (commandVal and tonumber(commandVal) or nil)
+  if commandId then
+    local deviceHash = computeDeviceIdHash(commandId)
+    local hashPath = cfgPathForHash(deviceHash)
+    if hashPath then
+      local hashLines = readFileLines(hashPath)
+      if not hashLines then
+        hashLines = readFileLines("/SCRIPTS/TOOLS/" .. hashPath)
+      end
+      if hashLines and #hashLines > 0 then
+        lines = hashLines
+      end
+    end
+  end
+
+  values["Band"] = findValue(lines, "Band")
+  values["Channel"] = findValue(lines, "Channel")
+  values["Command"] = findValue(lines, "Command")
+  values["Switch"] = findValue(lines, "Switch")
+  values["Positions"] = findValue(lines, "Positions")
 
   if #lines == 0 or (values["Band"] == nil and values["Channel"] == nil and values["Switch"] == nil) then
-    errorMsg = "No data in vtxConfig_auto.cfg"
+    errorMsg = "No data in vtxConfig"
     debugLines = lines
     return
   end
 
   local positionsCount = tonumber(values["Positions"] or "0") or 0
+  local positionsMap = {}
+  for i = 1, #lines do
+    local posIndex, posValue = string.match(lines[i], "^%s*Pos(%d+)%s*[:=]%s*(.+)%s*$")
+    if posIndex and posValue then
+      positionsMap[tonumber(posIndex)] = posValue
+    end
+  end
   for i = 1, positionsCount do
-    local pos = stripPrefix(lines[5 + i], "Pos" .. i)
+    local pos = positionsMap[i]
     if pos and pos ~= "" then
       positions[#positions + 1] = pos
     end
   end
 
-  local commandId = parseHexByte(values["Command"]) or (values["Command"] and tonumber(values["Command"]) or nil)
+  commandId = parseHexByte(values["Command"]) or (values["Command"] and tonumber(values["Command"]) or nil)
   if commandId then
     local deviceHash = computeDeviceIdHash(commandId)
     local licenseName = "license_" .. deviceHash .. ".txt"

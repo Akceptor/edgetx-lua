@@ -11,6 +11,8 @@ local CHANNEL_COMMAND
 local APPLY_COMMAND
 -- This is static as well, just put it here
 local APPLY_VALUE = 0x01
+local cfgPathLegacy = "vtxConfig_auto.cfg"
+local cfgPathTemplate = "vtxConfig_%s.cfg"
 
 -- Adjust values to match your VTX band mapping if needed
 local bands = {
@@ -52,10 +54,23 @@ local function computeDeviceIdHash(commandId)
   local ver, radio, maj, minor, rev, osname = getVersion()
   local input = (ver or "") .. "|" .. (radio or "") .. "|" .. (osname or "") .. "|" .. tostring(commandId or "")
   local hash = 5381
-  for i = 1, #input do
-    hash = (hash * 33 + string.byte(input, i)) % 4294967296
+  if bit32 then
+    for i = 1, #input do
+      hash = bit32.band(bit32.lshift(hash, 5) + hash + string.byte(input, i), 0xFFFFFFFF)
+    end
+  else
+    for i = 1, #input do
+      hash = (hash * 33 + string.byte(input, i)) % 4294967296
+    end
   end
   return string.format("%08X", hash)
+end
+
+local function cfgPathForHash(hash)
+  if not hash or hash == "" then
+    return nil
+  end
+  return string.format(cfgPathTemplate, hash)
 end
 
 local function normalizeDeviceId(deviceId)
@@ -141,6 +156,53 @@ local function stripPrefix(line, label)
   return string.match(line, pattern)
 end
 
+local function readConfigLines()
+  configMissingDetail = nil
+  local lines = readFileLines(cfgPathLegacy)
+  if not lines then
+    lines = readFileLines("/SCRIPTS/TOOLS/" .. cfgPathLegacy)
+  end
+  if lines then
+    local commandVal = nil
+    for i = 1, #lines do
+      commandVal = stripPrefix(lines[i], "Command") or commandVal
+    end
+    local commandId = parseHexByte(commandVal) or (commandVal and tonumber(commandVal) or nil)
+    if commandId then
+      local deviceHash = computeDeviceIdHash(commandId)
+      local hashPath = cfgPathForHash(deviceHash)
+      if hashPath then
+        local hashLines = readFileLines(hashPath)
+        if not hashLines then
+          hashLines = readFileLines("/SCRIPTS/TOOLS/" .. hashPath)
+        end
+        if hashLines and #hashLines > 0 then
+          lines = hashLines
+        end
+      end
+    end
+    return lines
+  end
+
+  local candidates = { 0x10, 0x11, 0x12, 0x13, 0x14 }
+  for i = 1, #candidates do
+    local deviceHash = computeDeviceIdHash(candidates[i])
+    local hashPath = cfgPathForHash(deviceHash)
+    if hashPath then
+      local hashLines = readFileLines(hashPath)
+      if not hashLines then
+        hashLines = readFileLines("/SCRIPTS/TOOLS/" .. hashPath)
+      end
+      if hashLines and #hashLines > 0 then
+        return hashLines
+      end
+    end
+  end
+  local lastHash = computeDeviceIdHash(candidates[#candidates])
+  configMissingDetail = cfgPathLegacy .. " or " .. cfgPathForHash(lastHash)
+  return nil
+end
+
 local function bandValueFromPrefix(prefix)
   for _, band in ipairs(bands) do
     if band.prefix == prefix then
@@ -172,10 +234,7 @@ local function parseSwitchOption(text)
 end
 
 local function loadCommandOverrides()
-  local lines = readFileLines("vtxConfig_auto.cfg")
-  if not lines then
-    lines = readFileLines("/SCRIPTS/TOOLS/vtxConfig_auto.cfg")
-  end
+  local lines = readConfigLines()
   if not lines then
     return false
   end
@@ -215,31 +274,10 @@ local function roundValue(value)
 end
 
 local function loadSwitchOverrides()
-  local file = io.open("vtxConfig_auto.cfg", "r")
-  if not file then
-    file = io.open("/SCRIPTS/TOOLS/vtxConfig_auto.cfg", "r")
-  end
-  if not file then
+  local lines = readConfigLines()
+  if not lines then
     return
   end
-
-  local lines = {}
-  while true do
-    local chunk = io.read(file, 128)
-    if not chunk or #chunk == 0 then
-      break
-    end
-    for line in string.gmatch(chunk, "([^\r\n]+)") do
-      lines[#lines + 1] = line
-      if #lines >= 64 then
-        break
-      end
-    end
-    if #lines >= 64 then
-      break
-    end
-  end
-  io.close(file)
 
   local positionsCount
   local positionsMap = {}
@@ -714,13 +752,11 @@ end
 
 local configMissing = false
 local licenseError = nil
+local configMissingDetail = nil
 
 local function checkLicense()
   if not APPLY_COMMAND then
-    local cfgLines = readFileLines("vtxConfig_auto.cfg")
-    if not cfgLines then
-      cfgLines = readFileLines("/SCRIPTS/TOOLS/vtxConfig_auto.cfg")
-    end
+    local cfgLines = readConfigLines()
     if cfgLines then
       local seenCommand = nil
       for i = 1, #cfgLines do
@@ -739,7 +775,7 @@ local function checkLicense()
     end
   end
   if not APPLY_COMMAND then
-    return false, "Command missing in vtxConfig_auto.cfg"
+    return false, "Command missing in vtxConfig"
   end
   local deviceHash = computeDeviceIdHash(APPLY_COMMAND)
   local licenseName = "license_" .. deviceHash .. ".txt"
@@ -776,7 +812,8 @@ end
 local function init()
   if not loadCommandOverrides() then
     configMissing = true
-    buildErrorUi("Config not found!", "Please run setup wizard first")
+    local detail = configMissingDetail or cfgPathLegacy
+    buildErrorUi("Config not found!", detail)
     return
   end
   local ok, err = checkLicense()

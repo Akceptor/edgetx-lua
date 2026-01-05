@@ -67,8 +67,14 @@ local function computeDeviceIdHash(commandId)
   local ver, radio, maj, minor, rev, osname = getVersion()
   local input = (ver or "") .. "|" .. (radio or "") .. "|" .. (osname or "") .. "|" .. tostring(commandId or "")
   local hash = 5381
-  for i = 1, #input do
-    hash = (hash * 33 + string.byte(input, i)) % 4294967296
+  if bit32 then
+    for i = 1, #input do
+      hash = bit32.band(bit32.lshift(hash, 5) + hash + string.byte(input, i), 0xFFFFFFFF)
+    end
+  else
+    for i = 1, #input do
+      hash = (hash * 33 + string.byte(input, i)) % 4294967296
+    end
   end
   return string.format("%08X", hash)
 end
@@ -536,8 +542,8 @@ local function fieldDryRunSave(field)
     return string.format("0x%02X", val)
   end
 
-  local function writeVtxConfigFile(bandId, channelId, commandId)
-    local file = io.open("vtxConfig_auto.cfg", "w")
+  local function writeVtxConfigFile(path, bandId, channelId, commandId)
+    local file = io.open(path, "w")
     if not file then
       return false
     end
@@ -565,11 +571,30 @@ local function fieldDryRunSave(field)
     return true, filename, hash
   end
 
+  local function writeDebugFile(commandId)
+    local file = io.open("vtx_debug.txt", "w")
+    if not file then
+      return false
+    end
+    io.write(file, "Command ID: ", toHexByte(commandId), "\n")
+    local ver, radio, maj, minor, rev, osname = getVersion()
+    local hashInput = (ver or "") .. "|" .. (radio or "") .. "|" .. (osname or "") .. "|" .. tostring(commandId or "")
+    io.write(file, "Hash input: ", hashInput, "\n")
+    io.write(file, "Hash: ", computeDeviceIdHash(commandId), "\n")
+    io.close(file)
+    return true
+  end
+
   local commandId = commandField.id
   local bandId = commandId and (commandId - 4) or nil
   local channelId = commandId and (commandId - 3) or nil
-  local wroteConfig = writeVtxConfigFile(bandId, channelId, commandId)
+  local deviceHash = computeDeviceIdHash(commandId)
+  local cfgPath = "vtxConfig_" .. deviceHash .. ".cfg"
+  local wroteConfig = writeVtxConfigFile(cfgPath, bandId, channelId, commandId)
+  local wroteLegacyConfig = writeVtxConfigFile("vtxConfig_auto.cfg", bandId, channelId, commandId)
   local wroteDeviceId = writeDeviceIdFile(commandId)
+  -- local wroteDebug = writeDebugFile(commandId)
+  local wroteDebug = writeDebugFile(commandId)
 
   for i = 1, #fields do
     local sibling = fields[i]
@@ -586,11 +611,17 @@ local function fieldDryRunSave(field)
     lines[#lines+1] = "No recent parameter payloads"
   end
   if not wroteConfig then
-    lines[#lines+1] = "vtxConfig_auto.cfg write failed"
+    lines[#lines+1] = "vtxConfig write failed"
+  end
+  if not wroteLegacyConfig then
+    lines[#lines+1] = "vtxConfig legacy write failed"
   end
   if not wroteDeviceId then
     lines[#lines+1] = "license file write failed"
   end
+  -- if not wroteDebug then
+  --   lines[#lines+1] = "debug file write failed"
+  -- end
 
   local title = "[" .. (commandField.name or "command") .. "] save config"
 

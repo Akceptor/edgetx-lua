@@ -1,6 +1,7 @@
 -- TNS|ConfigWizard|TNE
 local childPath = "_internal/vtx_auto.lua"
-local cfgPath = "vtxConfig_auto.cfg"
+local cfgPathLegacy = "vtxConfig_auto.cfg"
+local cfgPathTemplate = "vtxConfig_%s.cfg"
 local child = nil
 local done = false
 local errorMsg = nil
@@ -34,10 +35,23 @@ local function computeDeviceIdHash(commandId)
   local ver, radio, maj, minor, rev, osname = getVersion()
   local input = (ver or "") .. "|" .. (radio or "") .. "|" .. (osname or "") .. "|" .. tostring(commandId or "")
   local hash = 5381
-  for i = 1, #input do
-    hash = (hash * 33 + string.byte(input, i)) % 4294967296
+  if bit32 then
+    for i = 1, #input do
+      hash = bit32.band(bit32.lshift(hash, 5) + hash + string.byte(input, i), 0xFFFFFFFF)
+    end
+  else
+    for i = 1, #input do
+      hash = (hash * 33 + string.byte(input, i)) % 4294967296
+    end
   end
   return string.format("%08X", hash)
+end
+
+local function cfgPathForHash(hash)
+  if not hash or hash == "" then
+    return nil
+  end
+  return string.format(cfgPathTemplate, hash)
 end
 
 local function isPageNext(event)
@@ -72,10 +86,10 @@ local function init()
   end
 end
 
-local function readCfgLines()
+local function readCfgLines(path)
   local lines = {}
   local content = ""
-  local file = io.open(cfgPath, "r")
+  local file = io.open(path, "r")
   if file then
     local ok, data = pcall(function() return io.read(file, "*a") end)
     if ok and data then
@@ -90,33 +104,73 @@ local function readCfgLines()
 end
 
 local function readCfgValue(key)
-  local file = io.open(cfgPath, "r")
-  if not file then
-    file = io.open("/SCRIPTS/TOOLS/" .. cfgPath, "r")
+  local paths = {}
+  local hashPath = cfgPathForHash(deviceIdHash)
+  if hashPath then
+    paths[#paths + 1] = hashPath
+    paths[#paths + 1] = "/SCRIPTS/TOOLS/" .. hashPath
   end
-  if not file then
-    return nil
-  end
+  paths[#paths + 1] = cfgPathLegacy
+  paths[#paths + 1] = "/SCRIPTS/TOOLS/" .. cfgPathLegacy
 
-  local value = nil
-  while true do
-    local chunk = io.read(file, 128)
-    if not chunk or #chunk == 0 then
-      break
-    end
-    for line in string.gmatch(chunk, "([^\r\n]+)") do
-      local match = string.match(line, "^%s*" .. key .. ":%s*(.+)$")
-      if match then
-        value = match
-        break
+  for p = 1, #paths do
+    local file = io.open(paths[p], "r")
+    if file then
+      local value = nil
+      while true do
+        local chunk = io.read(file, 128)
+        if not chunk or #chunk == 0 then
+          break
+        end
+        for line in string.gmatch(chunk, "([^\r\n]+)") do
+          local match = string.match(line, "^%s*" .. key .. ":%s*(.+)$")
+          if match then
+            value = match
+            break
+          end
+        end
+        if value then
+          break
+        end
+      end
+      io.close(file)
+      if value then
+        return value
       end
     end
-    if value then
-      break
+  end
+  return nil
+end
+
+local function readCfgValueLegacy(key)
+  local paths = { cfgPathLegacy, "/SCRIPTS/TOOLS/" .. cfgPathLegacy }
+  for p = 1, #paths do
+    local file = io.open(paths[p], "r")
+    if file then
+      local value = nil
+      while true do
+        local chunk = io.read(file, 128)
+        if not chunk or #chunk == 0 then
+          break
+        end
+        for line in string.gmatch(chunk, "([^\r\n]+)") do
+          local match = string.match(line, "^%s*" .. key .. ":%s*(.+)$")
+          if match then
+            value = match
+            break
+          end
+        end
+        if value then
+          break
+        end
+      end
+      io.close(file)
+      if value then
+        return value
+      end
     end
   end
-  io.close(file)
-  return value
+  return nil
 end
 
 local function getDeviceIdHash()
@@ -124,6 +178,9 @@ local function getDeviceIdHash()
     return deviceIdHash
   end
   local commandText = readCfgValue("Command")
+  if not commandText then
+    commandText = readCfgValueLegacy("Command")
+  end
   local commandId = parseHexByte(commandText) or (commandText and tonumber(commandText) or nil)
   if not commandId then
     local hex = commandText and string.match(commandText, "^0x([%x]+)$") or nil
@@ -136,8 +193,8 @@ local function getDeviceIdHash()
   return deviceIdHash
 end
 
-local function appendCfgLine(line)
-  local file = io.open(cfgPath, "a")
+local function appendCfgLine(path, line)
+  local file = io.open(path, "a")
   if not file then
     return false
   end
@@ -146,8 +203,8 @@ local function appendCfgLine(line)
   return true
 end
 
-local function writeCfgLines(lines)
-  local file = io.open(cfgPath, "w")
+local function writeCfgLines(path, lines)
+  local file = io.open(path, "w")
   if not file then
     return false
   end
@@ -158,10 +215,32 @@ local function writeCfgLines(lines)
   return true
 end
 
+local function cfgPathsForWrite()
+  local paths = {}
+  local hashPath = cfgPathForHash(deviceIdHash)
+  if hashPath then
+    paths[#paths + 1] = hashPath
+  end
+  paths[#paths + 1] = cfgPathLegacy
+  return paths
+end
+
 local function updateCfgKey(key, value)
-  local lines = readCfgLines()
+  local lines = nil
+  local hashPath = cfgPathForHash(deviceIdHash)
+  if hashPath then
+    lines = readCfgLines(hashPath)
+  end
+  if not lines or #lines == 0 then
+    lines = readCfgLines(cfgPathLegacy)
+  end
   if #lines == 0 then
-    return appendCfgLine(key .. ": " .. value)
+    local ok = true
+    local paths = cfgPathsForWrite()
+    for i = 1, #paths do
+      ok = appendCfgLine(paths[i], key .. ": " .. value) and ok
+    end
+    return ok
   end
   local filtered = {}
   for i = 1, #lines do
@@ -170,7 +249,12 @@ local function updateCfgKey(key, value)
     end
   end
   filtered[#filtered + 1] = key .. ": " .. value
-  return writeCfgLines(filtered)
+  local ok = true
+  local paths = cfgPathsForWrite()
+  for i = 1, #paths do
+    ok = writeCfgLines(paths[i], filtered) and ok
+  end
+  return ok
 end
 
 local function updateCfgSwitch(value)
@@ -182,18 +266,30 @@ local function updateCfgPositions(value)
 end
 
 local function updateCfgPositionValues(values)
-  local lines = readCfgLines()
+  local lines = nil
+  local hashPath = cfgPathForHash(deviceIdHash)
+  if hashPath then
+    lines = readCfgLines(hashPath)
+  end
+  if not lines or #lines == 0 then
+    lines = readCfgLines(cfgPathLegacy)
+  end
   if #lines == 0 then
-    local file = io.open(cfgPath, "a")
-    if not file then
-      return false
+    local ok = true
+    local paths = cfgPathsForWrite()
+    for p = 1, #paths do
+      local file = io.open(paths[p], "a")
+      if not file then
+        ok = false
+      else
+        for i = 1, #values do
+          local v = values[i]
+          io.write(file, "Pos" .. i .. ": " .. v.band .. v.channel, "\n")
+        end
+        io.close(file)
+      end
     end
-    for i = 1, #values do
-      local v = values[i]
-      io.write(file, "Pos" .. i .. ": " .. v.band .. v.channel, "\n")
-    end
-    io.close(file)
-    return true
+    return ok
   end
   local filtered = {}
   for i = 1, #lines do
@@ -205,7 +301,12 @@ local function updateCfgPositionValues(values)
     local v = values[i]
     filtered[#filtered + 1] = "Pos" .. i .. ": " .. v.band .. v.channel
   end
-  return writeCfgLines(filtered)
+  local ok = true
+  local paths = cfgPathsForWrite()
+  for i = 1, #paths do
+    ok = writeCfgLines(paths[i], filtered) and ok
+  end
+  return ok
 end
 
 local function loadSelectionForPosition(index)
