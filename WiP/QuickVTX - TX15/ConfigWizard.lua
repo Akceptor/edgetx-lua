@@ -1,6 +1,5 @@
 -- TNS|ConfigWizard|TNE
 local childPath = "_internal/vtx_auto.lua"
-local cfgPathLegacy = "vtxConfig_auto.cfg"
 local cfgPathTemplate = "vtxConfig_%s.cfg"
 local child = nil
 local done = false
@@ -19,6 +18,7 @@ local posIndex = 1
 local posSelections = {}
 local posField = "band"
 local deviceIdHash = nil
+local baseConfigWritten = false
 
 local function parseHexByte(text)
   if not text then
@@ -29,6 +29,13 @@ local function parseHexByte(text)
     return nil
   end
   return tonumber(hex, 16)
+end
+
+local function toHexByte(val)
+  if not val then
+    return ""
+  end
+  return string.format("0x%02X", val)
 end
 
 local function computeDeviceIdHash(commandId)
@@ -103,94 +110,49 @@ local function readCfgLines(path)
   return lines
 end
 
-local function readCfgValue(key)
-  local paths = {}
-  local hashPath = cfgPathForHash(deviceIdHash)
-  if hashPath then
-    paths[#paths + 1] = hashPath
-    paths[#paths + 1] = "/SCRIPTS/TOOLS/" .. hashPath
-  end
-  paths[#paths + 1] = cfgPathLegacy
-  paths[#paths + 1] = "/SCRIPTS/TOOLS/" .. cfgPathLegacy
-
-  for p = 1, #paths do
-    local file = io.open(paths[p], "r")
-    if file then
-      local value = nil
-      while true do
-        local chunk = io.read(file, 128)
-        if not chunk or #chunk == 0 then
-          break
-        end
-        for line in string.gmatch(chunk, "([^\r\n]+)") do
-          local match = string.match(line, "^%s*" .. key .. ":%s*(.+)$")
-          if match then
-            value = match
-            break
-          end
-        end
-        if value then
-          break
-        end
-      end
-      io.close(file)
-      if value then
-        return value
-      end
-    end
-  end
-  return nil
-end
-
-local function readCfgValueLegacy(key)
-  local paths = { cfgPathLegacy, "/SCRIPTS/TOOLS/" .. cfgPathLegacy }
-  for p = 1, #paths do
-    local file = io.open(paths[p], "r")
-    if file then
-      local value = nil
-      while true do
-        local chunk = io.read(file, 128)
-        if not chunk or #chunk == 0 then
-          break
-        end
-        for line in string.gmatch(chunk, "([^\r\n]+)") do
-          local match = string.match(line, "^%s*" .. key .. ":%s*(.+)$")
-          if match then
-            value = match
-            break
-          end
-        end
-        if value then
-          break
-        end
-      end
-      io.close(file)
-      if value then
-        return value
-      end
-    end
-  end
-  return nil
-end
-
 local function getDeviceIdHash()
   if deviceIdHash then
     return deviceIdHash
   end
-  local commandText = readCfgValue("Command")
-  if not commandText then
-    commandText = readCfgValueLegacy("Command")
-  end
-  local commandId = parseHexByte(commandText) or (commandText and tonumber(commandText) or nil)
-  if not commandId then
-    local hex = commandText and string.match(commandText, "^0x([%x]+)$") or nil
-    commandId = hex and tonumber(hex, 16) or nil
+  local commandId = nil
+  if child and type(child.getLastCommandId) == "function" then
+    commandId = child.getLastCommandId()
+  elseif VTX_AUTO_LAST_COMMAND_ID then
+    commandId = VTX_AUTO_LAST_COMMAND_ID
   end
   if not commandId then
     return nil
   end
   deviceIdHash = computeDeviceIdHash(commandId)
   return deviceIdHash
+end
+
+local function writeBaseConfig()
+  local commandId = nil
+  if child and type(child.getLastCommandId) == "function" then
+    commandId = child.getLastCommandId()
+  elseif VTX_AUTO_LAST_COMMAND_ID then
+    commandId = VTX_AUTO_LAST_COMMAND_ID
+  end
+  if not commandId then
+    return false
+  end
+  deviceIdHash = computeDeviceIdHash(commandId)
+  local path = cfgPathForHash(deviceIdHash)
+  if not path then
+    return false
+  end
+  local file = io.open(path, "w")
+  if not file then
+    return false
+  end
+  local bandId = commandId - 4
+  local channelId = commandId - 3
+  io.write(file, "Band: ", toHexByte(bandId), "\n")
+  io.write(file, "Channel: ", toHexByte(channelId), "\n")
+  io.write(file, "Command: ", toHexByte(commandId), "\n")
+  io.close(file)
+  return true
 end
 
 local function appendCfgLine(path, line)
@@ -221,7 +183,6 @@ local function cfgPathsForWrite()
   if hashPath then
     paths[#paths + 1] = hashPath
   end
-  paths[#paths + 1] = cfgPathLegacy
   return paths
 end
 
@@ -231,12 +192,12 @@ local function updateCfgKey(key, value)
   if hashPath then
     lines = readCfgLines(hashPath)
   end
-  if not lines or #lines == 0 then
-    lines = readCfgLines(cfgPathLegacy)
-  end
   if #lines == 0 then
     local ok = true
     local paths = cfgPathsForWrite()
+    if #paths == 0 then
+      return false
+    end
     for i = 1, #paths do
       ok = appendCfgLine(paths[i], key .. ": " .. value) and ok
     end
@@ -251,6 +212,9 @@ local function updateCfgKey(key, value)
   filtered[#filtered + 1] = key .. ": " .. value
   local ok = true
   local paths = cfgPathsForWrite()
+  if #paths == 0 then
+    return false
+  end
   for i = 1, #paths do
     ok = writeCfgLines(paths[i], filtered) and ok
   end
@@ -271,12 +235,12 @@ local function updateCfgPositionValues(values)
   if hashPath then
     lines = readCfgLines(hashPath)
   end
-  if not lines or #lines == 0 then
-    lines = readCfgLines(cfgPathLegacy)
-  end
   if #lines == 0 then
     local ok = true
     local paths = cfgPathsForWrite()
+    if #paths == 0 then
+      return false
+    end
     for p = 1, #paths do
       local file = io.open(paths[p], "a")
       if not file then
@@ -303,6 +267,9 @@ local function updateCfgPositionValues(values)
   end
   local ok = true
   local paths = cfgPathsForWrite()
+  if #paths == 0 then
+    return false
+  end
   for i = 1, #paths do
     ok = writeCfgLines(paths[i], filtered) and ok
   end
@@ -352,6 +319,13 @@ local function run(event, touchState)
     end
 
     if done then
+      if not baseConfigWritten then
+        baseConfigWritten = writeBaseConfig()
+        if not baseConfigWritten then
+          errorMsg = "Config write failed"
+          return 0
+        end
+      end
       lcd.clear()
       local hash = getDeviceIdHash()
       if hash then

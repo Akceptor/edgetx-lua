@@ -11,8 +11,13 @@ local CHANNEL_COMMAND
 local APPLY_COMMAND
 -- This is static as well, just put it here
 local APPLY_VALUE = 0x01
-local cfgPathLegacy = "vtxConfig_auto.cfg"
 local cfgPathTemplate = "vtxConfig_%s.cfg"
+local cfgPathResolved = nil
+local childPath = "_internal/vtx_auto.lua"
+local child = nil
+local childActive = false
+local childError = nil
+local mainInitDone = false
 
 -- Adjust values to match your VTX band mapping if needed
 local bands = {
@@ -50,6 +55,13 @@ local function parseHexByte(text)
   return tonumber(hex, 16)
 end
 
+local function toHexByte(val)
+  if not val then
+    return ""
+  end
+  return string.format("0x%02X", val)
+end
+
 local function computeDeviceIdHash(commandId)
   local ver, radio, maj, minor, rev, osname = getVersion()
   local input = (ver or "") .. "|" .. (radio or "") .. "|" .. (osname or "") .. "|" .. tostring(commandId or "")
@@ -71,6 +83,49 @@ local function cfgPathForHash(hash)
     return nil
   end
   return string.format(cfgPathTemplate, hash)
+end
+
+local function updateResolvedConfigPath(commandId)
+  local hash = commandId and computeDeviceIdHash(commandId) or nil
+  cfgPathResolved = hash and cfgPathForHash(hash) or nil
+end
+
+local function initChild()
+  local loaded = loadScript(childPath)
+  if type(loaded) == "function" then
+    loaded = loaded()
+  end
+  if type(loaded) ~= "table" or type(loaded.run) ~= "function" then
+    childError = "Child load failed"
+    return false
+  end
+  child = loaded
+  if type(child.init) == "function" then
+    child.init()
+  end
+  return true
+end
+
+local vtxAutoInitDone = false
+
+local function getCommandIdFromInternal()
+  if VTX_AUTO_LAST_COMMAND_ID then
+    return VTX_AUTO_LAST_COMMAND_ID
+  end
+  local loaded = loadScript("_internal/vtx_auto.lua")
+  if type(loaded) == "function" then
+    loaded = loaded()
+  end
+  if type(loaded) == "table" then
+    if not vtxAutoInitDone and type(loaded.init) == "function" then
+      loaded.init()
+      vtxAutoInitDone = true
+    end
+    if type(loaded.getLastCommandId) == "function" then
+    return loaded.getLastCommandId()
+    end
+  end
+  return nil
 end
 
 local function normalizeDeviceId(deviceId)
@@ -158,35 +213,10 @@ end
 
 local function readConfigLines()
   configMissingDetail = nil
-  local lines = readFileLines(cfgPathLegacy)
-  if not lines then
-    lines = readFileLines("/SCRIPTS/TOOLS/" .. cfgPathLegacy)
-  end
-  if lines then
-    local commandVal = nil
-    for i = 1, #lines do
-      commandVal = stripPrefix(lines[i], "Command") or commandVal
-    end
-    local commandId = parseHexByte(commandVal) or (commandVal and tonumber(commandVal) or nil)
-    if commandId then
-      local deviceHash = computeDeviceIdHash(commandId)
-      local hashPath = cfgPathForHash(deviceHash)
-      if hashPath then
-        local hashLines = readFileLines(hashPath)
-        if not hashLines then
-          hashLines = readFileLines("/SCRIPTS/TOOLS/" .. hashPath)
-        end
-        if hashLines and #hashLines > 0 then
-          lines = hashLines
-        end
-      end
-    end
-    return lines
-  end
-
-  local candidates = { 0x10, 0x11, 0x12, 0x13, 0x14 }
-  for i = 1, #candidates do
-    local deviceHash = computeDeviceIdHash(candidates[i])
+  local internalCommandId = getCommandIdFromInternal()
+  if internalCommandId then
+    updateResolvedConfigPath(internalCommandId)
+    local deviceHash = computeDeviceIdHash(internalCommandId)
     local hashPath = cfgPathForHash(deviceHash)
     if hashPath then
       local hashLines = readFileLines(hashPath)
@@ -198,8 +228,20 @@ local function readConfigLines()
       end
     end
   end
-  local lastHash = computeDeviceIdHash(candidates[#candidates])
-  configMissingDetail = cfgPathLegacy .. " or " .. cfgPathForHash(lastHash)
+  if cfgPathResolved then
+    local resolvedLines = readFileLines(cfgPathResolved)
+    if not resolvedLines then
+      resolvedLines = readFileLines("/SCRIPTS/TOOLS/" .. cfgPathResolved)
+    end
+    if resolvedLines and #resolvedLines > 0 then
+      return resolvedLines
+    end
+  end
+  if internalCommandId and cfgPathResolved then
+    configMissingDetail = cfgPathResolved .. " (cmd " .. toHexByte(internalCommandId) .. ")"
+  else
+    configMissingDetail = cfgPathResolved or cfgPathTemplate
+  end
   return nil
 end
 
@@ -320,8 +362,6 @@ local function loadSwitchOverrides()
     SWITCH_POSITIONS = overrides
   end
 end
-
-loadSwitchOverrides()
 
 local function generateOptions()
   local rows = {}
@@ -621,8 +661,14 @@ end
 
 local function buildUi()
   lvgl.clear()
+  local titleText = "Quick VTX"
+  local cmd = getCommandIdFromInternal()
+  if cmd then
+    local hash = computeDeviceIdHash(cmd)
+    titleText = "Quick VTX " .. hash
+  end
   ui.page = lvgl.page({
-    title = "Quick VTX",
+    title = titleText,
     subtitle = "",
     scrollable = false,
     titleColor = ACTIVE_COLOR,
@@ -756,6 +802,12 @@ local configMissingDetail = nil
 
 local function checkLicense()
   if not APPLY_COMMAND then
+    APPLY_COMMAND = getCommandIdFromInternal() or APPLY_COMMAND
+  end
+  if APPLY_COMMAND then
+    updateResolvedConfigPath(APPLY_COMMAND)
+  end
+  if not APPLY_COMMAND then
     local cfgLines = readConfigLines()
     if cfgLines then
       local seenCommand = nil
@@ -810,12 +862,23 @@ local function checkLicense()
 end
 
 local function init()
+  local cmd = getCommandIdFromInternal()
+  if cmd then
+    updateResolvedConfigPath(cmd)
+  else
+    if initChild() then
+      childActive = true
+      return
+    end
+  end
+
   if not loadCommandOverrides() then
     configMissing = true
-    local detail = configMissingDetail or cfgPathLegacy
+    local detail = configMissingDetail or cfgPathTemplate
     buildErrorUi("Config not found!", detail)
     return
   end
+  loadSwitchOverrides()
   local ok, err = checkLicense()
   if not ok then
     licenseError = err
@@ -825,9 +888,29 @@ local function init()
   local defaultBandIdx = bandIndexFromPrefix(DEFAULT_BAND) or 1
   setSelection(defaultBandIdx, DEFAULT_CHANNEL, false)
   buildUi()
+  mainInitDone = true
 end
 
 local function run(event, touchState)
+  if childActive then
+    if childError then
+      buildErrorUi("Config not found!", childError)
+      childActive = false
+      return 0
+    end
+    local res = child and child.run and child.run(event, touchState) or 0
+    if res == 1 then
+      childActive = false
+      local cmd = getCommandIdFromInternal()
+      if cmd then
+        updateResolvedConfigPath(cmd)
+      end
+      if not mainInitDone then
+        init()
+      end
+    end
+    return 0
+  end
   if configMissing or licenseError then
     if event == EVT_VIRTUAL_EXIT then
       return 1

@@ -1,6 +1,4 @@
 -- TNS|Config Viewer|TNE
-local cfgPathLegacy = "vtxConfig_auto.cfg"
-local cfgPathLegacyFallback = "/SCRIPTS/TOOLS/vtxConfig_auto.cfg"
 local cfgPathTemplate = "vtxConfig_%s.cfg"
 local values = {}
 local positions = {}
@@ -166,11 +164,22 @@ local function loadConfig()
   positions = {}
   debugLines = nil
   licenseInfo = nil
-  local lines = readFileLines(cfgPathLegacy)
-  if not lines then
-    lines = readFileLines(cfgPathLegacyFallback)
+  local lines = nil
+  local candidates = { 0x10, 0x11, 0x12, 0x13, 0x14 }
+  for i = 1, #candidates do
+    local deviceHash = computeDeviceIdHash(candidates[i])
+    local hashPath = cfgPathForHash(deviceHash)
+    if hashPath then
+      lines = readFileLines(hashPath)
+      if not lines then
+        lines = readFileLines("/SCRIPTS/TOOLS/" .. hashPath)
+      end
+      if lines and #lines > 0 then
+        break
+      end
+    end
   end
-  if not lines then
+  if not lines or #lines == 0 then
     errorMsg = "vtxConfig not found"
     return
   end
@@ -191,22 +200,6 @@ local function loadConfig()
       end
     end
     return nil
-  end
-
-  local commandVal = findValue(lines, "Command")
-  local commandId = parseHexByte(commandVal) or (commandVal and tonumber(commandVal) or nil)
-  if commandId then
-    local deviceHash = computeDeviceIdHash(commandId)
-    local hashPath = cfgPathForHash(deviceHash)
-    if hashPath then
-      local hashLines = readFileLines(hashPath)
-      if not hashLines then
-        hashLines = readFileLines("/SCRIPTS/TOOLS/" .. hashPath)
-      end
-      if hashLines and #hashLines > 0 then
-        lines = hashLines
-      end
-    end
   end
 
   values["Band"] = findValue(lines, "Band")

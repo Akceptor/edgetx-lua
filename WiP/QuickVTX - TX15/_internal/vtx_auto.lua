@@ -542,26 +542,14 @@ local function fieldDryRunSave(field)
     return string.format("0x%02X", val)
   end
 
-  local function writeVtxConfigFile(path, bandId, channelId, commandId)
-    local file = io.open(path, "w")
-    if not file then
-      return false
-    end
-    io.write(file, "Band: ", toHexByte(bandId), "\n")
-    io.write(file, "Channel: ", toHexByte(channelId), "\n")
-    io.write(file, "Command: ", toHexByte(commandId), "\n")
-    io.close(file)
-    return true
-  end
-
-  local function writeDeviceIdFile(commandId)
+local function writeDeviceIdFile(commandId)
     local hash = computeDeviceIdHash(commandId)
     local filename = "license_" .. hash .. ".txt"
     local existing = io.open(filename, "r")
     if existing then
       io.close(existing)
-      return true, filename, hash
-    end
+  return true, filename, hash
+end
     local file = io.open(filename, "w")
     if not file then
       return false, filename, hash
@@ -572,28 +560,13 @@ local function fieldDryRunSave(field)
   end
 
   local function writeDebugFile(commandId)
-    local file = io.open("vtx_debug.txt", "w")
-    if not file then
-      return false
-    end
-    io.write(file, "Command ID: ", toHexByte(commandId), "\n")
-    local ver, radio, maj, minor, rev, osname = getVersion()
-    local hashInput = (ver or "") .. "|" .. (radio or "") .. "|" .. (osname or "") .. "|" .. tostring(commandId or "")
-    io.write(file, "Hash input: ", hashInput, "\n")
-    io.write(file, "Hash: ", computeDeviceIdHash(commandId), "\n")
-    io.close(file)
+    -- NO-OP
     return true
   end
 
   local commandId = commandField.id
-  local bandId = commandId and (commandId - 4) or nil
-  local channelId = commandId and (commandId - 3) or nil
-  local deviceHash = computeDeviceIdHash(commandId)
-  local cfgPath = "vtxConfig_" .. deviceHash .. ".cfg"
-  local wroteConfig = writeVtxConfigFile(cfgPath, bandId, channelId, commandId)
-  local wroteLegacyConfig = writeVtxConfigFile("vtxConfig_auto.cfg", bandId, channelId, commandId)
+  VTX_AUTO_LAST_COMMAND_ID = commandId
   local wroteDeviceId = writeDeviceIdFile(commandId)
-  -- local wroteDebug = writeDebugFile(commandId)
   local wroteDebug = writeDebugFile(commandId)
 
   for i = 1, #fields do
@@ -609,12 +582,6 @@ local function fieldDryRunSave(field)
 
   if #lines == 1 then
     lines[#lines+1] = "No recent parameter payloads"
-  end
-  if not wroteConfig then
-    lines[#lines+1] = "vtxConfig write failed"
-  end
-  if not wroteLegacyConfig then
-    lines[#lines+1] = "vtxConfig legacy write failed"
   end
   if not wroteDeviceId then
     lines[#lines+1] = "license file write failed"
@@ -1348,4 +1315,8 @@ local function run(event, touchState)
   return exitscript
 end
 
-return { init=init, run=run }
+local function getLastCommandId()
+  return VTX_AUTO_LAST_COMMAND_ID
+end
+
+return { init=init, run=run, getLastCommandId=getLastCommandId }
