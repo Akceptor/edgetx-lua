@@ -56,14 +56,21 @@ local function formatPayload(payload)
   if not payload then
     return ""
   end
-  local out = ""
+  local parts = {}
   for i = 1, #payload do
-    if i > 1 then
-      out = out .. " "
-    end
-    out = out .. string.format("%02X", payload[i])
+    parts[#parts+1] = string.format("%02X", payload[i])
   end
-  return out
+  return table.concat(parts, " ")
+end
+
+local function computeDeviceIdHash(commandId)
+  local ver, radio, maj, minor, rev, osname = getVersion()
+  local input = (ver or "") .. "|" .. (radio or "") .. "|" .. (osname or "") .. "|" .. tostring(commandId or "")
+  local hash = 5381
+  for i = 1, #input do
+    hash = (hash * 33 + string.byte(input, i)) % 4294967296
+  end
+  return string.format("%08X", hash)
 end
 
 local function clonePayload(payload)
@@ -541,10 +548,28 @@ local function fieldDryRunSave(field)
     return true
   end
 
+  local function writeDeviceIdFile(commandId)
+    local hash = computeDeviceIdHash(commandId)
+    local filename = "license_" .. hash .. ".txt"
+    local existing = io.open(filename, "r")
+    if existing then
+      io.close(existing)
+      return true, filename, hash
+    end
+    local file = io.open(filename, "w")
+    if not file then
+      return false, filename, hash
+    end
+    io.write(file, "DEVICEID = ", hash, "\n")
+    io.close(file)
+    return true, filename, hash
+  end
+
   local commandId = commandField.id
   local bandId = commandId and (commandId - 4) or nil
   local channelId = commandId and (commandId - 3) or nil
   local wroteConfig = writeVtxConfigFile(bandId, channelId, commandId)
+  local wroteDeviceId = writeDeviceIdFile(commandId)
 
   for i = 1, #fields do
     local sibling = fields[i]
@@ -562,6 +587,9 @@ local function fieldDryRunSave(field)
   end
   if not wroteConfig then
     lines[#lines+1] = "vtxConfig_auto.cfg write failed"
+  end
+  if not wroteDeviceId then
+    lines[#lines+1] = "license file write failed"
   end
 
   local title = "[" .. (commandField.name or "command") .. "] save config"
