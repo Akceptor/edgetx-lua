@@ -38,11 +38,107 @@ local function parseHexByte(text)
   if not text then
     return nil
   end
-  local hex = string.match(text, "0x[%da-fA-F]+")
+  local hex = string.match(text, "0[xX]([%da-fA-F]+)")
+  if not hex then
+    hex = string.match(text, "([%da-fA-F]+)")
+  end
   if not hex then
     return nil
   end
   return tonumber(hex, 16)
+end
+
+local function computeDeviceIdHash(commandId)
+  local ver, radio, maj, minor, rev, osname = getVersion()
+  local input = (ver or "") .. "|" .. (radio or "") .. "|" .. (osname or "") .. "|" .. tostring(commandId or "")
+  local hash = 5381
+  for i = 1, #input do
+    hash = (hash * 33 + string.byte(input, i)) % 4294967296
+  end
+  return string.format("%08X", hash)
+end
+
+local function normalizeDeviceId(deviceId)
+  return string.upper(string.gsub(deviceId or "", "^%s*(.-)%s*$", "%1"))
+end
+
+local function normalizeEmail(email)
+  return string.lower(string.gsub(email or "", "^%s*(.-)%s*$", "%1"))
+end
+
+local function normalizeHex(text)
+  local hex = string.match(text or "", "0x([%da-fA-F]+)")
+  if not hex then
+    hex = string.match(text or "", "([%da-fA-F]+)")
+  end
+  if not hex then
+    return ""
+  end
+  return string.upper(hex)
+end
+
+local function computeLicense(deviceId, email)
+  local input = normalizeDeviceId(deviceId) .. "|" .. normalizeEmail(email)
+  local hash = 5381
+  if bit32 then
+    for i = 1, #input do
+      hash = bit32.band(bit32.lshift(hash, 5) + hash + string.byte(input, i), 0xFFFFFFFF)
+    end
+  else
+    for i = 1, #input do
+      hash = (hash * 33 + string.byte(input, i)) % 4294967296
+    end
+  end
+  return string.format("%08X", hash)
+end
+
+local function readFileLines(path)
+  local file = io.open(path, "r")
+  if not file then
+    return nil
+  end
+  local lines = {}
+  local pending = ""
+  while true do
+    local chunk = io.read(file, 128)
+    if not chunk or #chunk == 0 then
+      break
+    end
+    local text = pending .. chunk
+    local start = 1
+    while true do
+      local i, j = string.find(text, "[\r\n]", start)
+      if not i then
+        break
+      end
+      local line = string.sub(text, start, i - 1)
+      if line ~= "" then
+        lines[#lines + 1] = line
+      end
+      start = j + 1
+      while start <= #text do
+        local c = string.sub(text, start, start)
+        if c ~= "\r" and c ~= "\n" then
+          break
+        end
+        start = start + 1
+      end
+    end
+    pending = string.sub(text, start)
+  end
+  if pending ~= "" then
+    lines[#lines + 1] = pending
+  end
+  io.close(file)
+  return lines
+end
+
+local function stripPrefix(line, label)
+  if not line then
+    return nil
+  end
+  local pattern = "^%s*" .. label .. "%s*[:=]%s*(.+)%s*$"
+  return string.match(line, pattern)
 end
 
 local function bandValueFromPrefix(prefix)
@@ -76,43 +172,29 @@ local function parseSwitchOption(text)
 end
 
 local function loadCommandOverrides()
-  local file = io.open("vtxConfig_auto.cfg", "r")
-  if not file then
-    file = io.open("/SCRIPTS/TOOLS/vtxConfig_auto.cfg", "r")
+  local lines = readFileLines("vtxConfig_auto.cfg")
+  if not lines then
+    lines = readFileLines("/SCRIPTS/TOOLS/vtxConfig_auto.cfg")
   end
-  if not file then
+  if not lines then
     return false
   end
 
-  local function applyLine(line)
-    local bandVal = string.match(line, "^%s*Band:%s*(.+)$")
+  for i = 1, #lines do
+    local line = lines[i]
+    local bandVal = stripPrefix(line, "Band")
     if bandVal then
       BAND_COMMAND = parseHexByte(bandVal) or BAND_COMMAND
-      return
     end
-    local channelVal = string.match(line, "^%s*Channel:%s*(.+)$")
+    local channelVal = stripPrefix(line, "Channel")
     if channelVal then
       CHANNEL_COMMAND = parseHexByte(channelVal) or CHANNEL_COMMAND
-      return
     end
-    local applyVal = string.match(line, "^%s*Command:%s*(.+)$")
+    local applyVal = stripPrefix(line, "Command")
     if applyVal then
       APPLY_COMMAND = parseHexByte(applyVal) or APPLY_COMMAND
-      return
     end
   end
-
-  while true do
-    local chunk = io.read(file, 128)
-    if not chunk or #chunk == 0 then
-      break
-    end
-    for line in string.gmatch(chunk, "([^\r\n]+)") do
-      applyLine(line)
-    end
-  end
-
-  io.close(file)
   return true
 end
 
@@ -609,10 +691,10 @@ local function buildUi()
   refreshButtons()
 end
 
-local function buildErrorUi()
+local function buildErrorUi(titleText, messageText)
   lvgl.clear()
   ui.page = lvgl.page({
-    title = "Config not found!",
+    title = titleText or "Config not found!",
     subtitle = "",
     scrollable = false,
     titleColor = ACTIVE_COLOR,
@@ -626,16 +708,81 @@ local function buildErrorUi()
     h = 24,
     font = MIDSIZE,
     align = lvgl.ALIGN_CENTER,
-    text = "Please run setup wizard first",
+    text = messageText or "Please run setup wizard first",
   })
 end
 
 local configMissing = false
+local licenseError = nil
+
+local function checkLicense()
+  if not APPLY_COMMAND then
+    local cfgLines = readFileLines("vtxConfig_auto.cfg")
+    if not cfgLines then
+      cfgLines = readFileLines("/SCRIPTS/TOOLS/vtxConfig_auto.cfg")
+    end
+    if cfgLines then
+      local seenCommand = nil
+      for i = 1, #cfgLines do
+        local applyVal = stripPrefix(cfgLines[i], "Command")
+        if applyVal then
+          seenCommand = applyVal
+          APPLY_COMMAND = parseHexByte(applyVal) or APPLY_COMMAND
+          if APPLY_COMMAND then
+            break
+          end
+        end
+      end
+      if not APPLY_COMMAND and seenCommand then
+        return false, "Command parse failed: " .. tostring(seenCommand)
+      end
+    end
+  end
+  if not APPLY_COMMAND then
+    return false, "Command missing in vtxConfig_auto.cfg"
+  end
+  local deviceHash = computeDeviceIdHash(APPLY_COMMAND)
+  local licenseName = "license_" .. deviceHash .. ".txt"
+  local lines = readFileLines(licenseName)
+  if not lines then
+    lines = readFileLines("/SCRIPTS/TOOLS/" .. licenseName)
+  end
+  if not lines then
+    return false, "License file missing"
+  end
+  local deviceId = nil
+  local email = nil
+  local licenseVal = nil
+  for i = 1, #lines do
+    deviceId = deviceId or stripPrefix(lines[i], "DEVICEID")
+    email = email or stripPrefix(lines[i], "EMAIL")
+    licenseVal = licenseVal or stripPrefix(lines[i], "LICENSE")
+  end
+  if not (deviceId and email and licenseVal) then
+    return false, "License data missing"
+  end
+  local expectedLicense = computeLicense(deviceId, email)
+  local deviceMatch = normalizeHex(deviceId) == normalizeHex(deviceHash)
+  if not deviceMatch then
+    return false, "Device ID mismatch"
+  end
+  local licenseMatch = normalizeHex(licenseVal) == normalizeHex(expectedLicense)
+  if not licenseMatch then
+    return false, "License mismatch"
+  end
+  return true
+end
 
 local function init()
   if not loadCommandOverrides() then
     configMissing = true
-    buildErrorUi()
+    buildErrorUi("Config not found!", "Please run setup wizard first")
+    return
+  end
+  local ok, err = checkLicense()
+  if not ok then
+    licenseError = err
+    buildErrorUi("License error", err or "License mismatch")
     return
   end
   local defaultBandIdx = bandIndexFromPrefix(DEFAULT_BAND) or 1
@@ -644,7 +791,7 @@ local function init()
 end
 
 local function run(event, touchState)
-  if configMissing then
+  if configMissing or licenseError then
     if event == EVT_VIRTUAL_EXIT then
       return 1
     end
