@@ -478,10 +478,10 @@ local function run(event, touchState)
     if logoH and logoH > 0 then
       lineY = textY + 2
     end
-    drawTextTheme(textX, lineY, "Select switch", nil, textFlags)
-    drawTextTheme(textX, lineY + 14, "Switch: " .. switches[switchIndex], nil, textFlags)
-    drawTextTheme(textX, lineY + 28, "ROTARY change", nil, textFlags)
-    drawTextTheme(textX, lineY + 42, "PAGE> save", nil, textFlags)
+    drawTextTheme(textX, lineY, "Select switch", MIDSIZE, textFlags)
+    drawTextTheme(textX, lineY + 22, "Switch: " .. switches[switchIndex], nil, textFlags)
+    drawTextTheme(textX, lineY + 40, "ROTARY change", nil, textFlags)
+    drawTextTheme(textX, lineY + 58, "PAGE> save", nil, textFlags)
   elseif page == 2 then
     if isRotNext(event) then
       positionIndex = (positionIndex % #positions) + 1
@@ -507,10 +507,10 @@ local function run(event, touchState)
     if logoH and logoH > 0 then
       lineY = textY + 2
     end
-    drawTextTheme(textX, lineY, "Select positions", nil, textFlags)
-    drawTextTheme(textX, lineY + 14, "Positions: " .. positions[positionIndex], nil, textFlags)
-    drawTextTheme(textX, lineY + 28, "ROTARY change", nil, textFlags)
-    drawTextTheme(textX, lineY + 42, "PAGE> save", nil, textFlags)
+    drawTextTheme(textX, lineY, "Select positions", MIDSIZE, textFlags)
+    drawTextTheme(textX, lineY + 22, "Positions: " .. positions[positionIndex], nil, textFlags)
+    drawTextTheme(textX, lineY + 40, "ROTARY change", nil, textFlags)
+    drawTextTheme(textX, lineY + 58, "PAGE> save", nil, textFlags)
   elseif page == 3 then
     if isRotNext(event) then
       if posField == "band" then
@@ -554,21 +554,40 @@ local function run(event, touchState)
     if logoH and logoH > 0 then
       lineY = textY + 2
     end
-    drawTextTheme(textX, lineY, "Pos " .. posIndex .. "/" .. positionsCount, nil, textFlags)
-    drawTextTheme(textX, lineY + 14, "Band: " .. bands[bandIndex], nil, textFlags)
-    drawTextTheme(textX, lineY + 28, "Channel: " .. channels[channelIndex], nil, textFlags)
-    drawTextTheme(textX, lineY + 42, "ROTARY change,", nil, textFlags)
-        drawTextTheme(textX, lineY + 56, "PAGE> next", nil, textFlags)
+    drawTextTheme(textX, lineY, "Pos " .. posIndex .. "/" .. positionsCount, MIDSIZE, textFlags)
+    local bandLabel = "Band: " .. bands[bandIndex]
+    local channelLabel = "Channel: " .. channels[channelIndex]
+    if posField == "band" then
+      bandLabel = ">" .. bandLabel
+    else
+      channelLabel = ">" .. channelLabel
+    end
+    drawTextTheme(textX, lineY + 22, bandLabel, nil, textFlags)
+    drawTextTheme(textX, lineY + 40, channelLabel, nil, textFlags)
+    drawTextTheme(textX, lineY + 58, "ROTARY change,", nil, textFlags)
+    drawTextTheme(textX, lineY + 76, "PAGE> next", nil, textFlags)
   else
     local textFlags = beginPage()
-    local textX, textY, logoH = drawCornerLogo()
-    if not textX then textX = 2 end
-    if not textY then textY = 2 end
-    local lineY = textY
-    if logoH and logoH > 0 then
-      lineY = textY + 2
+    loadLogoImage()
+    if logoImage then
+      local x = 0
+      local y = 0
+      if logoImageW and logoImageH then
+        x = math.floor((LCD_W - logoImageW) / 2)
+        y = math.floor((LCD_H - logoImageH) / 2)
+        if x < 0 then x = 0 end
+        if y < 0 then y = 0 end
+      end
+      lcd.drawBitmap(logoImage, x, y)
     end
-    drawTextTheme(textX, lineY, "Setup saved", nil, textFlags)
+    local savedText = "Setup saved"
+    local savedX = 2
+    if lcd.getTextWidth then
+      local savedW = lcd.getTextWidth(0, savedText)
+    end
+    local savedY = LCD_H - 50
+    if savedY < 2 then savedY = 2 end
+    drawTextTheme(300, savedY, savedText, DBLSIZE, textFlags)
   end
 
   return 0
