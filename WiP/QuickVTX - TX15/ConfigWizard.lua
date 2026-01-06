@@ -1,5 +1,6 @@
 -- TNS|ConfigWizard|TNE
 local childPath = "_internal/vtx_auto.lua"
+local logoPath = "_internal/logo.png"
 local cfgPathTemplate = "vtxConfig_%s.cfg"
 local child = nil
 local done = false
@@ -19,6 +20,13 @@ local posSelections = {}
 local posField = "band"
 local deviceIdHash = nil
 local baseConfigWritten = false
+local logoImage = nil
+local logoImageW = nil
+local logoImageH = nil
+local logoCornerImage = nil
+local logoCornerW = nil
+local logoCornerH = nil
+local logoCornerScale = 0.5
 
 local function parseHexByte(text)
   if not text then
@@ -91,6 +99,82 @@ local function init()
   if type(child.init) == "function" then
     child.init()
   end
+end
+
+local function loadLogoImage()
+  if logoImage ~= nil or lcd.RGB == nil or Bitmap == nil then
+    return
+  end
+  local ok, img = pcall(Bitmap.open, logoPath)
+  if ok and img then
+    logoImage = img
+    if Bitmap.getSize then
+      local w, h = Bitmap.getSize(img)
+      logoImageW, logoImageH = w, h
+    end
+  end
+end
+
+local function loadCornerLogoImage()
+  if logoCornerImage ~= nil or lcd.RGB == nil or Bitmap == nil then
+    return
+  end
+  loadLogoImage()
+  if not logoImage then
+    return
+  end
+  if Bitmap.resize and logoImageW and logoImageH then
+    local w = math.floor(logoImageW * logoCornerScale)
+    local h = math.floor(logoImageH * logoCornerScale)
+    local ok, img = pcall(Bitmap.resize, logoImage, w, h)
+    if ok and img then
+      logoCornerImage = img
+      if Bitmap.getSize then
+        local rw, rh = Bitmap.getSize(img)
+        logoCornerW, logoCornerH = rw, rh
+      else
+        logoCornerW, logoCornerH = w, h
+      end
+      return
+    end
+  end
+  logoCornerImage = logoImage
+  logoCornerW = logoImageW
+  logoCornerH = logoImageH
+end
+
+local function beginPage()
+  lcd.clear()
+  if lcd.RGB then
+    lcd.setColor(CUSTOM_COLOR, BLACK)
+    lcd.drawFilledRectangle(0, 0, LCD_W, LCD_H, CUSTOM_COLOR)
+    lcd.setColor(CUSTOM_COLOR, WHITE)
+    return CUSTOM_COLOR
+  end
+  return 0
+end
+
+local function drawTextTheme(x, y, text, flags, colorFlag)
+  local f = flags or 0
+  if colorFlag and colorFlag ~= 0 then
+    f = f + colorFlag
+  elseif lcd.RGB then
+    f = f + CUSTOM_COLOR
+  end
+  lcd.drawText(x, y, text, f)
+end
+
+local function drawCornerLogo()
+  loadCornerLogoImage()
+  if not logoCornerImage then
+    return nil, nil
+  end
+  local x = 2
+  local y = 2
+  lcd.drawBitmap(logoCornerImage, x, y)
+  local w = logoCornerW or 0
+  local h = logoCornerH or 0
+  return x + w + 4, y, h
 end
 
 local function readCfgLines(path)
@@ -299,14 +383,14 @@ end
 
 local function run(event, touchState)
   if errorMsg then
-    lcd.clear()
-    lcd.drawText(2, 2, errorMsg)
+    local textFlags = beginPage()
+    drawTextTheme(2, 2, errorMsg, nil, textFlags)
     return 0
   end
 
   if not child then
-    lcd.clear()
-    lcd.drawText(2, 2, "Loading...")
+    local textFlags = beginPage()
+    drawTextTheme(2, 2, "Loading...", nil, textFlags)
     return 0
   end
 
@@ -326,14 +410,49 @@ local function run(event, touchState)
           return 0
         end
       end
-      lcd.clear()
+      local textFlags = beginPage()
+      loadLogoImage()
       local hash = getDeviceIdHash()
-      if hash then
-        lcd.drawText(2, 2, "Licensing device ID = " .. hash)
-      else
-        lcd.drawText(2, 2, "Licensing device ID = N/A")
+      local idText = hash and ("Licensing device ID = " .. hash) or "Licensing device ID = N/A"
+      local infoText = "Press PAGE> to continue"
+      local imageY = 0
+      if logoImage then
+        local x = 0
+        local y = 0
+        if logoImageW and logoImageH then
+          x = math.floor((LCD_W - logoImageW) / 2)
+          y = math.floor((LCD_H - logoImageH) / 2)
+          if x < 0 then x = 0 end
+          if y < 0 then y = 0 end
+        end
+        lcd.drawBitmap(logoImage, x, y)
+        imageY = y
       end
-      lcd.drawText(2, 16, "Press PAGE> to continue")
+      local textX = 2
+      local idY = 2
+      if lcd.getTextWidth then
+        local idW = lcd.getTextWidth(0, idText)
+        textX = math.floor((LCD_W - idW) / 2)
+        if textX < 0 then textX = 0 end
+      end
+      if logoImage and logoImageH then
+        idY = imageY - 14
+        if idY < 2 then idY = 2 end
+      end
+      drawTextTheme(textX, idY, idText, nil, textFlags)
+      local infoX = 2
+      if lcd.getTextWidth then
+        local infoW = lcd.getTextWidth(0, infoText)
+        infoX = math.floor((LCD_W - infoW) / 2)
+        if infoX < 0 then infoX = 0 end
+      end
+      local infoY = idY + 14
+      if logoImage and logoImageH then
+        infoY = imageY + logoImageH + 2
+      end
+      if infoY < 2 then infoY = 2 end
+      if infoY > LCD_H - 12 then infoY = LCD_H - 12 end
+      drawTextTheme(infoX, infoY-20, infoText, nil, textFlags)
       if isPageNext(event) then
         page = 1
       end
@@ -351,11 +470,18 @@ local function run(event, touchState)
       end
     end
 
-    lcd.clear()
-    lcd.drawText(2, 2, "Select switch")
-    lcd.drawText(2, 16, "Switch: " .. switches[switchIndex])
-    lcd.drawText(2, 30, "ROTARY change")
-    lcd.drawText(2, 44, "PAGE> save")
+    local textFlags = beginPage()
+    local textX, textY, logoH = drawCornerLogo()
+    if not textX then textX = 2 end
+    if not textY then textY = 2 end
+    local lineY = textY
+    if logoH and logoH > 0 then
+      lineY = textY + 2
+    end
+    drawTextTheme(textX, lineY, "Select switch", nil, textFlags)
+    drawTextTheme(textX, lineY + 14, "Switch: " .. switches[switchIndex], nil, textFlags)
+    drawTextTheme(textX, lineY + 28, "ROTARY change", nil, textFlags)
+    drawTextTheme(textX, lineY + 42, "PAGE> save", nil, textFlags)
   elseif page == 2 then
     if isRotNext(event) then
       positionIndex = (positionIndex % #positions) + 1
@@ -373,11 +499,18 @@ local function run(event, touchState)
       end
     end
 
-    lcd.clear()
-    lcd.drawText(2, 2, "Select positions")
-    lcd.drawText(2, 16, "Positions: " .. positions[positionIndex])
-    lcd.drawText(2, 30, "ROTARY change")
-    lcd.drawText(2, 44, "PAGE> save")
+    local textFlags = beginPage()
+    local textX, textY, logoH = drawCornerLogo()
+    if not textX then textX = 2 end
+    if not textY then textY = 2 end
+    local lineY = textY
+    if logoH and logoH > 0 then
+      lineY = textY + 2
+    end
+    drawTextTheme(textX, lineY, "Select positions", nil, textFlags)
+    drawTextTheme(textX, lineY + 14, "Positions: " .. positions[positionIndex], nil, textFlags)
+    drawTextTheme(textX, lineY + 28, "ROTARY change", nil, textFlags)
+    drawTextTheme(textX, lineY + 42, "PAGE> save", nil, textFlags)
   elseif page == 3 then
     if isRotNext(event) then
       if posField == "band" then
@@ -413,14 +546,29 @@ local function run(event, touchState)
       end
     end
 
-    lcd.clear()
-    lcd.drawText(2, 2, "Pos " .. posIndex .. "/" .. positionsCount)
-    lcd.drawText(2, 16, "Band: " .. bands[bandIndex])
-    lcd.drawText(2, 30, "Channel: " .. channels[channelIndex])
-    lcd.drawText(2, 44, "ROTARY change, PAGE> next")
+    local textFlags = beginPage()
+    local textX, textY, logoH = drawCornerLogo()
+    if not textX then textX = 2 end
+    if not textY then textY = 2 end
+    local lineY = textY
+    if logoH and logoH > 0 then
+      lineY = textY + 2
+    end
+    drawTextTheme(textX, lineY, "Pos " .. posIndex .. "/" .. positionsCount, nil, textFlags)
+    drawTextTheme(textX, lineY + 14, "Band: " .. bands[bandIndex], nil, textFlags)
+    drawTextTheme(textX, lineY + 28, "Channel: " .. channels[channelIndex], nil, textFlags)
+    drawTextTheme(textX, lineY + 42, "ROTARY change,", nil, textFlags)
+        drawTextTheme(textX, lineY + 56, "PAGE> next", nil, textFlags)
   else
-    lcd.clear()
-    lcd.drawText(2, 2, "Setup saved")
+    local textFlags = beginPage()
+    local textX, textY, logoH = drawCornerLogo()
+    if not textX then textX = 2 end
+    if not textY then textY = 2 end
+    local lineY = textY
+    if logoH and logoH > 0 then
+      lineY = textY + 2
+    end
+    drawTextTheme(textX, lineY, "Setup saved", nil, textFlags)
   end
 
   return 0
