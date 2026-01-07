@@ -1,4 +1,4 @@
--- TNS| ELRS-CONFIG|TNE
+-- TNS|VTX-CFG|TNE
 ---- #########################################################################
 ---- #                                                                       #
 ---- # Copyright (C) OpenTX, adapted for ExpressLRS                          #
@@ -6,9 +6,10 @@
 ---- # License GPLv2: http://www.gnu.org/licenses/gpl-2.0.html               #
 ---- #                                                                       #
 ---- #########################################################################
+local EXITVER = "-- EXIT (Lua r15) --"
 local deviceId = 0xEE
 local handsetId = 0xEF
-local deviceName = ""
+local deviceName = "Loading..."
 local lineIndex = 1
 local pageOffset = 0
 local edit = nil
@@ -19,7 +20,7 @@ local fieldChunk = 0
 local fieldData = nil
 local fields = {}
 local devices = {}
-local goodBadPkt = "?/???    ?"
+local goodBadPkt = ""
 local elrsFlags = 0
 local elrsFlagsInfo = ""
 local fields_count = 0
@@ -34,84 +35,115 @@ local titleShowWarnTimeout = 100
 local exitscript = 0
 local lastPayloadHex = nil
 
+local FIELD_TYPE_COMMAND = 13
+local FIELD_TYPE_DRYRUN = 17
+
+local VTX_MENU_PREFIX = "VTX Admin"
+local vtxMenuId = nil
+local autoEnterVtx = true
+local autoSaveConfig = true
+local autoSaveDone = false
+local HEADLESS = true
+
 local COL1
 local COL2
 local maxLineIndex
 local textYoffset
 local textSize
+local barTextSpacing
 
 local function formatPayload(payload)
   if not payload then
     return ""
   end
-  local hex = ""
+  local out = ""
   for i = 1, #payload do
-    local part = string.format("%02X", payload[i])
-    if i == 1 then
-      hex = part
-    else
-      hex = hex .. " " .. part
+    if i > 1 then
+      out = out .. " "
     end
+    out = out .. string.format("%02X", payload[i])
   end
-  return hex
+  return out
 end
 
-local function rememberFieldPayload(field, payload)
-  if not field then
-    return
+local function clonePayload(payload)
+  local copy = {}
+  for i = 1, #payload do
+    copy[i] = payload[i]
   end
+  return copy
+end
+
+local function rememberFieldPayload(field, opcode, payload, opts)
+  if not field then return end
+  local copy = clonePayload(payload)
+  local hex = formatPayload(payload)
   field.lastSentPayload = {
-    payload = payload,
-    hex = formatPayload(payload),
+    opcode = opcode,
+    payload = copy,
+    hex = hex,
   }
-  lastPayloadHex = field.lastSentPayload.hex
-end
-
-local function findSiblingFieldId(commandField, keyword)
-  local key = string.lower(keyword)
-  for i = 1, #fields do
-    local sibling = fields[i]
-    if sibling ~= commandField
-      and sibling.parent == commandField.parent
-      and sibling.lastSentPayload
-      and sibling.lastSentPayload.payload
-      and sibling.name then
-      if string.find(string.lower(sibling.name), key, 1, true) then
-        return sibling.lastSentPayload.payload[3]
-      end
-    end
+  if opts and opts.globalHex then
+    lastPayloadHex = hex
   end
-  return nil
-end
-
-local function toHexByte(val)
-  if not val then
-    return ""
-  end
-  return string.format("0x%02X", val)
-end
-
-local function writeVtxConfigFile(bandId, channelId, commandId)
-  local file = io.open("vtxConfig.cfg", "w")
-  if not file then
-    return false
-  end
-  io.write(file, "Band: ", toHexByte(bandId), "\n")
-  io.write(file, "Channel: ", toHexByte(channelId), "\n")
-  io.write(file, "Command: ", toHexByte(commandId), "\n")
-  io.close(file)
-  return true
 end
 
 local function allocateFields()
+  -- fields table is real fields, then the Other Devices item, then devices, then Exit/Back
+  vtxMenuId = nil
+  autoEnterVtx = true
+  autoSaveDone = false
   fields = {}
-  for i=1, fields_count + 2 + #devices do
+  for i=1, fields_count do
     fields[i] = { }
   end
-  fields[#fields] = {name="----EXIT----", type=14}
+  fields[#fields+1] = {id=fields_count+1, name="Other Devices", parent=255, type=16}
+  fields[#fields+1] = {name=EXITVER, type=14}
+end
+
+local function fieldMatchesVtxPrefix(name)
+  return name and string.sub(name, 1, #VTX_MENU_PREFIX) == VTX_MENU_PREFIX
+end
+
+local function fieldIsVtxRelated(field)
+  if not field then
+    return false
+  end
+  if field.type == 14 then
+    return true
+  end
+  if fieldMatchesVtxPrefix(field.name) then
+    vtxMenuId = field.id
+    return true
+  end
+  if not vtxMenuId then
+    return false
+  end
+  local parent = field.parent
+  while parent do
+    if parent == vtxMenuId then
+      return true
+    end
+    local parentField = fields[parent]
+    if not parentField then
+      break
+    end
+    parent = parentField.parent
+  end
+  return false
+end
+
+local function createDeviceFields() -- put other devices in the field list
+  -- move back button to the end of the list, so it will always show up at the bottom.
+  fields[fields_count + #devices + 2] = fields[#fields]
+  for i=1, #devices do
+    local parent = (devices[i].id == deviceId) and 255 or (fields_count+1)
+    fields[fields_count + 1 + i] = {id=devices[i].id, name=devices[i].name, parent=parent, type=15}
+  end
 end
 
 local function reloadAllField()
+  fieldTimeout = 0
   fieldChunk = 0
   fieldData = nil
   -- loadQ is actually a stack
@@ -125,33 +157,51 @@ local function getField(line)
   local counter = 1
   for i = 1, #fields do
     local field = fields[i]
-    if field and currentFolderId == field.parent and not field.hidden then
-      if counter < line then
-        counter = counter + 1
-      else
+    if currentFolderId == field.parent and not field.hidden and fieldIsVtxRelated(field) then
+      if counter == line then
         return field
+      end
+      counter = counter + 1
+
+      local dry = field.dryRunField
+      if dry and not dry.hidden and fieldIsVtxRelated(dry) then
+        if counter == line then
+          return dry
+        end
+        counter = counter + 1
       end
     end
   end
 end
 
+local function getFieldCount()
+  local count = 0
+  for i = 1, #fields do
+    local field = fields[i]
+    if currentFolderId == field.parent and not field.hidden and fieldIsVtxRelated(field) then
+      count = count + 1
+      local dry = field.dryRunField
+      if dry and not dry.hidden and fieldIsVtxRelated(dry) then
+        count = count + 1
+      end
+    end
+  end
+  return count
+end
+
 local function incrField(step)
   local field = getField(lineIndex)
-  if not field or not field.type then
-    return
-  end
   local min, max = 0, 0
-  local values = field.values or {}
   if field.type <= 8 then
     min = field.min or 0
     max = field.max or 0
     step = (field.step or 1) * step
   elseif field.type == 9 then
     min = 0
-    max = #values - 1
+    max = #field.values - 1
   end
 
-  local newval = field.value or 0
+  local newval = field.value
   repeat
     newval = newval + step
     if newval < min then
@@ -161,7 +211,7 @@ local function incrField(step)
     end
 
     -- keep looping until a non-blank selection value is found
-    if field.values == nil or #values[newval+1] ~= 0 then
+    if field.values == nil or #field.values[newval+1] ~= 0 then
       field.value = newval
       return
     end
@@ -170,13 +220,22 @@ end
 
 -- Select the next or previous editable field
 local function selectField(step)
+  local total = getFieldCount()
+  if total == 0 then
+    return
+  end
+  if lineIndex > total then
+    lineIndex = total
+  elseif lineIndex < 1 then
+    lineIndex = 1
+  end
   local newLineIndex = lineIndex
   local field
   repeat
     newLineIndex = newLineIndex + step
     if newLineIndex <= 0 then
-      newLineIndex = #fields
-    elseif newLineIndex == 1 + #fields then
+      newLineIndex = total
+    elseif newLineIndex > total then
       newLineIndex = 1
       pageOffset = 0
     end
@@ -191,46 +250,41 @@ local function selectField(step)
 end
 
 local function fieldGetStrOrOpts(data, offset, last, isOpts)
-  if last then
-    while data[offset] ~= 0 do
-      offset = offset + 1
-    end
-    return last, offset + 1
-  end
-
   -- For isOpts: Split a table of byte values (string) with ; separator into a table
   -- Else just read a string until the first null byte
-  local r = isOpts and {}
+  local r = last or (isOpts and {})
   local opt = ''
-  local b = data[offset]
-  while b ~= 0 do
-    if r and b == 59 then -- ';'
-      r[#r+1] = opt
-      opt = ''
-    else
-      -- On firmwares that have constants defined for the arrow chars, use them in place of
-      -- the \xc0 \xc1 chars (which are OpenTX-en)
-      -- Use the table to convert the char, else use string.char if not in the table
-      opt = opt .. (({
-        [192] = CHAR_UP or (__opentx and __opentx.CHAR_UP),
-        [193] = CHAR_DOWN or (__opentx and __opentx.CHAR_DOWN)
-      })[b] or string.char(b))
-    end
+  local vcnt = 0
+  repeat
+    local b = data[offset]
     offset = offset + 1
-    b = data[offset]
-  end
 
-  if r then
-    r[#r+1] = opt
-    opt = r
-  end
-  return opt, offset + 1, collectgarbage("collect")
+    if not last then
+      if r and (b == 59 or b == 0) then -- ';'
+        r[#r+1] = opt
+        if opt ~= '' then
+          vcnt = vcnt + 1
+          opt = ''
+        end
+      elseif b ~= 0 then
+        -- On firmwares that have constants defined for the arrow chars, use them in place of
+        -- the \xc0 \xc1 chars (which are OpenTX-en)
+        -- Use the table to convert the char, else use string.char if not in the table
+        opt = opt .. (({
+          [192] = CHAR_UP or (__opentx and __opentx.CHAR_UP),
+          [193] = CHAR_DOWN or (__opentx and __opentx.CHAR_DOWN)
+        })[b] or string.char(b))
+      end
+    end
+  until b == 0
+
+  return (r or opt), offset, vcnt, collectgarbage("collect")
 end
 
-local function getDevice(name)
-  for i=1, #devices do
-    if devices[i].name == name then
-      return devices[i]
+local function getDevice(id)
+  for _, device in ipairs(devices) do
+    if device.id == id then
+      return device
     end
   end
 end
@@ -241,6 +295,17 @@ local function fieldGetValue(data, offset, size)
     result = bit32.lshift(result, 8) + data[offset + i]
   end
   return result
+end
+
+local function reloadCurField()
+  local field = getField(lineIndex)
+  if not field or field.isDryRun then
+    return
+  end
+  fieldTimeout = 0
+  fieldChunk = 0
+  fieldData = nil
+  loadQ[#loadQ+1] = field.id
 end
 
 -- UINT8/INT8/UINT16/INT16 + FLOAT + TEXTSELECT
@@ -278,9 +343,6 @@ local function fieldIntLoad(field, data, offset)
 end
 
 local function fieldIntSave(field)
-  if field.value == nil or field.id == nil then
-    return
-  end
   local value = field.value
   local size = field.size or 1
   -- Convert signed to 2s complement
@@ -295,14 +357,12 @@ local function fieldIntSave(field)
   for i = size-1, 0, -1 do
     frame[#frame + 1] = bit32.rshift(value, 8*i) % 256
   end
-  rememberFieldPayload(field, frame)
+  rememberFieldPayload(field, 0x2D, frame)
   crossfireTelemetryPush(0x2D, frame)
 end
 
 local function fieldIntDisplay(field, y, attr)
-  local value = field.value or 0
-  local unit = field.unit or ""
-  lcd.drawText(COL2, y, value .. unit, attr)
+  lcd.drawText(COL2, y, field.value .. field.unit, attr)
 end
 
 -- -- FLOAT
@@ -321,18 +381,18 @@ local function fieldFloatLoad(field, data, offset)
 end
 
 local function fieldFloatDisplay(field, y, attr)
-  if field.fmt and field.prec and field.value then
-    lcd.drawText(COL2, y, string.format(field.fmt, field.value / field.prec), attr)
-  else
-    local value = field.value or 0
-    local unit = field.unit or ""
-    lcd.drawText(COL2, y, value .. unit, attr)
-  end
+  lcd.drawText(COL2, y, string.format(field.fmt, field.value / field.prec), attr)
 end
 
 -- TEXT SELECTION
 local function fieldTextSelLoad(field, data, offset)
-  field.values, offset = fieldGetStrOrOpts(data, offset, field.nc == nil and field.values, true)
+  local vcnt
+  local cached = field.nc == nil and field.values
+  field.values, offset, vcnt = fieldGetStrOrOpts(data, offset, cached, true)
+  -- 'Disable' the line if values only has one option in the list
+  if not cached then
+    field.grey = vcnt <= 1
+  end
   field.value = data[offset]
   -- min max and default (offset+1 to 3) are not used on selections
   -- units never uses cache
@@ -340,20 +400,16 @@ local function fieldTextSelLoad(field, data, offset)
   field.nc = nil -- use cache next time
 end
 
-local function fieldTextSelDisplay_color(field, y, attr)
-  local values = field.values or {}
-  local idx = (field.value or 0) + 1
-  local val = values[idx] or "ERR"
-  lcd.drawText(COL2, y, val, attr)
+local function fieldTextSelDisplay_color(field, y, attr, color)
+  local val = field.values[field.value+1] or "ERR"
+  lcd.drawText(COL2, y, val, attr + color)
   local strPix = lcd.sizeText and lcd.sizeText(val) or (10 * #val)
-  lcd.drawText(COL2 + strPix, y, field.unit or "", 0)
+  lcd.drawText(COL2 + strPix, y, field.unit, color)
 end
 
 local function fieldTextSelDisplay_bw(field, y, attr)
-  local values = field.values or {}
-  local idx = (field.value or 0) + 1
-  lcd.drawText(COL2, y, values[idx] or "ERR", attr)
-  lcd.drawText(lcd.getLastPos(), y, field.unit or "", 0)
+  lcd.drawText(COL2, y, field.values[field.value+1] or "ERR", attr)
+  lcd.drawText(lcd.getLastPos(), y, field.unit, 0)
 end
 
 -- STRING
@@ -365,7 +421,7 @@ local function fieldStringLoad(field, data, offset)
 end
 
 local function fieldStringDisplay(field, y, attr)
-  lcd.drawText(COL2, y, field.value or "", attr)
+  lcd.drawText(COL2, y, field.value, attr)
 end
 
 local function fieldFolderOpen(field)
@@ -382,12 +438,14 @@ local function fieldFolderOpen(field)
 end
 
 local function fieldFolderDeviceOpen(field)
-  crossfireTelemetryPush(0x28, { 0x00, 0xEA }) --broadcast with standard handset ID to get all node respond correctly
+  -- crossfireTelemetryPush(0x28, { 0x00, 0xEA }) --broadcast with standard handset ID to get all node respond correctly
+  -- Make sure device fields are in the folder when it opens
+  createDeviceFields()
   return fieldFolderOpen(field)
 end
 
 local function fieldFolderDisplay(field,y ,attr)
-  lcd.drawText(COL1, y, "> " .. (field.name or ""), bit32.bor(attr, BOLD))
+  lcd.drawText(COL1, y,(field.name or ""), attr + BOLD)
 end
 
 local function fieldCommandLoad(field, data, offset)
@@ -397,17 +455,33 @@ local function fieldCommandLoad(field, data, offset)
   if field.status == 0 then
     fieldPopup = nil
   end
+
+  local dry = field.dryRunField
+  if not dry then
+    dry = {
+      type = FIELD_TYPE_DRYRUN,
+      name = "save config",
+      isDryRun = true,
+    }
+    field.dryRunField = dry
+  end
+  dry.parent = field.parent
+  dry.hidden = field.hidden
+  dry.commandField = field
+  dry.id = field.id
 end
 
 local function fieldCommandSave(field)
+  reloadCurField()
+
   if field.status ~= nil then
     if field.status < 4 then
       field.status = 1
       local payload = { deviceId, handsetId, field.id, field.status }
-      rememberFieldPayload(field, payload)
-      local bandId = findSiblingFieldId(field, "band")
-      local channelId = findSiblingFieldId(field, "channel")
-      writeVtxConfigFile(bandId, channelId, field.id)
+
+      -- store payload for later display
+      rememberFieldPayload(field, 0x2D, payload, { globalHex = true })
+
       crossfireTelemetryPush(0x2D, payload)
       fieldPopup = field
       fieldPopup.lastStatus = 0
@@ -417,7 +491,168 @@ local function fieldCommandSave(field)
 end
 
 local function fieldCommandDisplay(field, y, attr)
-    lcd.drawText(10, y, "[" .. (field.name or "") .. "]", bit32.bor(attr, BOLD))
+    lcd.drawText(10, y, "[" .. field.name .. "]", attr + BOLD)
+end
+
+local function fieldDryRunSave(field)
+  local commandField = field.commandField
+  if not commandField or commandField.status == nil or commandField.status >= 4 then
+    return
+  end
+
+  local payload = { deviceId, handsetId, commandField.id, 1 }
+  local payloadHex = formatPayload(payload)
+  local lines = {}
+  lines[#lines+1] = "Command: " .. payloadHex
+
+  local function findSiblingFieldId(keyword)
+    local key = string.lower(keyword)
+    for i = 1, #fields do
+      local sibling = fields[i]
+      if sibling ~= commandField
+        and sibling.parent == commandField.parent
+        and sibling.lastSentPayload
+        and sibling.lastSentPayload.payload
+        and sibling.name then
+        if string.find(string.lower(sibling.name), key, 1, true) then
+          return sibling.lastSentPayload.payload[3]
+        end
+      end
+    end
+    return nil
+  end
+
+  local function toHexByte(val)
+    if not val then
+      return ""
+    end
+    return string.format("0x%02X", val)
+  end
+
+  local function writeVtxConfigFile(bandId, channelId, commandId)
+    local file = io.open("vtxConfig_auto.cfg", "w")
+    if not file then
+      return false
+    end
+    io.write(file, "Band: ", toHexByte(bandId), "\n")
+    io.write(file, "Channel: ", toHexByte(channelId), "\n")
+    io.write(file, "Command: ", toHexByte(commandId), "\n")
+    io.close(file)
+    return true
+  end
+
+  local commandId = commandField.id
+  local bandId = commandId and (commandId - 4) or nil
+  local channelId = commandId and (commandId - 3) or nil
+  local wroteConfig = writeVtxConfigFile(bandId, channelId, commandId)
+
+  for i = 1, #fields do
+    local sibling = fields[i]
+    if sibling ~= commandField
+      and sibling.parent == commandField.parent
+      and sibling.lastSentPayload
+      and sibling.lastSentPayload.hex
+      and sibling.name then
+      lines[#lines+1] = sibling.name .. ": " .. sibling.lastSentPayload.hex
+    end
+  end
+
+  if #lines == 1 then
+    lines[#lines+1] = "No recent parameter payloads"
+  end
+  if not wroteConfig then
+    lines[#lines+1] = "vtxConfig_auto.cfg write failed"
+  end
+
+  local title = "[" .. (commandField.name or "command") .. "] save config"
+
+  fieldPopup = {
+    dryRun = true,
+    title = title,
+    info = title,
+    message = "Press [OK] to close",
+    footer = "Press [OK] to close",
+    lines = lines,
+    payloadHex = payloadHex,
+    relatedPayloads = lines,
+  }
+end
+
+local function maybeAutoEnterVtx(field)
+  if not autoEnterVtx or not field then
+    return
+  end
+  if fieldMatchesVtxPrefix(field.name) then
+    vtxMenuId = field.id
+    autoEnterVtx = false
+    if currentFolderId == nil then
+      fieldFolderOpen(field)
+    end
+  end
+end
+
+local function maybeAutoSaveConfigForVtx()
+  if autoSaveDone or not autoSaveConfig or not vtxMenuId then
+    return
+  end
+  for i = 1, #fields do
+    local field = fields[i]
+    if field
+      and field.type == FIELD_TYPE_COMMAND
+      and field.parent == vtxMenuId then
+      local dry = field.dryRunField
+      if dry then
+        autoSaveDone = true
+        fieldDryRunSave(dry)
+        if HEADLESS then
+          exitscript = 1
+        end
+        return
+      end
+    end
+  end
+end
+
+local function fieldDryRunDisplay(field, y, attr)
+  lcd.drawText(10, y, "[save config]", attr + BOLD)
+end
+
+local function drawDryRunPopupContent(popup)
+  local baseSize = textSize or 12
+  local spacing = barTextSpacing or 4
+  local lineHeight = math.max(baseSize + spacing, baseSize + 2)
+  local y = spacing
+  local title = popup.title or popup.info or "Dry run"
+  lcd.drawText(COL1, y, title, BOLD)
+  y = y + lineHeight
+
+  local lines = popup.lines or {}
+  local attr = SMLSIZE or 0
+  for i = 1, #lines do
+    if y > LCD_H - (2 * lineHeight) then
+      lcd.drawText(COL1, y, "...", attr)
+      y = y + lineHeight
+      break
+    end
+    lcd.drawText(COL1, y, lines[i], attr)
+    y = y + lineHeight
+  end
+
+  local footer = popup.footer or popup.message or "Press [OK] to close"
+  local footerY = LCD_H - lineHeight - spacing
+  if footerY < y then
+    footerY = y
+  end
+  lcd.drawText(COL1, footerY, footer, INVERS)
+end
+
+local function handleDryRunPopup(event)
+  lcd.clear()
+  drawDryRunPopupContent(fieldPopup)
+
+  if event == EVT_VIRTUAL_ENTER or event == EVT_VIRTUAL_EXIT then
+    fieldPopup = nil
+  end
 end
 
 local function fieldBackExec(field)
@@ -425,7 +660,7 @@ local function fieldBackExec(field)
     lineIndex = field.li or 1
     pageOffset = field.po or 0
 
-    field.name = "----EXIT----"
+    field.name = EXITVER
     field.parent = nil
     field.li = nil
     field.po = nil
@@ -436,61 +671,43 @@ local function fieldBackExec(field)
 end
 
 local function changeDeviceId(devId) --change to selected device ID
-  currentFolderId = nil
-  deviceIsELRS_TX = nil
-  elrsFlags = 0
-  --if the selected device ID (target) is a TX Module, we use our Lua ID, so TX Flag that user is using our LUA
-  if devId == 0xEE then
-    handsetId = 0xEF
-  else --else we would act like the legacy lua
-    handsetId = 0xEA
-  end
+  local device = getDevice(devId)
+  if deviceId == devId and fields_count == device.fldcnt then return end
+
   deviceId = devId
-  fields_count = 0  --set this because next target wouldn't have the same count, and this trigger to request the new count
+  elrsFlags = 0
+  currentFolderId = nil
+  deviceName = device.name
+  fields_count = device.fldcnt
+  deviceIsELRS_TX = device.isElrs and devId == 0xEE or nil -- ELRS and ID is TX module
+  handsetId = deviceIsELRS_TX and 0xEF or 0xEA -- Address ELRS_LUA vs RADIO_TRANSMITTER
+
+  allocateFields()
+  reloadAllField()
 end
 
 local function fieldDeviceIdSelect(field)
-  local device = getDevice(field.name)
-  if not device then
-    return
-  end
-  changeDeviceId(device.id)
-  crossfireTelemetryPush(0x28, { 0x00, 0xEA })
-end
-
-local function createDeviceFields() -- put other devices in the field list
-  -- move back button to the end of the list, so it will always show up at the bottom.
-  fields[fields_count + 2 + #devices] = fields[#fields]
-  for i=1, #devices do
-    local parent = (devices[i].id == deviceId) and 255 or (fields_count+1)
-    fields[fields_count+1+i] = {name=devices[i].name, parent=parent, type=15}
-  end
+  return changeDeviceId(field.id)
 end
 
 local function parseDeviceInfoMessage(data)
-  local offset
   local id = data[2]
-  local newName
-  newName, offset = fieldGetStrOrOpts(data, 3)
-  local device = getDevice(newName)
+  local newName, offset = fieldGetStrOrOpts(data, 3)
+  local device = getDevice(id)
   if device == nil then
-    device = { id = id, name = newName }
+    device = { id = id }
     devices[#devices + 1] = device
   end
+  device.name = newName
+  device.fldcnt = data[offset + 12]
+  device.isElrs = fieldGetValue(data, offset, 4) == 0x454C5253 -- SerialNumber = 'E L R S'
+
   if deviceId == id then
-    deviceName = newName
-    deviceIsELRS_TX = ((fieldGetValue(data,offset,4) == 0x454C5253) and (deviceId == 0xEE)) or nil -- SerialNumber = 'E L R S' and ID is TX module
-    local newFieldCount = data[offset+12]
-    if newFieldCount ~= fields_count or newFieldCount == 0 then
-      fields_count = newFieldCount
-      allocateFields()
-      reloadAllField()
-      fields[fields_count+1] = {id = fields_count+1, name="Other Devices", parent = 255, type=16} -- add other devices folders
-      if newFieldCount == 0 then
-        -- This device has no fields so the Loading code never starts
-        createDeviceFields()
-      end
-    end
+    changeDeviceId(id)
+  end
+  -- DeviceList change while in Other Devices, refresh list
+  if currentFolderId == fields_count + 1 then
+    createDeviceFields()
   end
 end
 
@@ -512,6 +729,7 @@ local functions = {
   { load=nil, save=fieldBackExec, display=fieldCommandDisplay }, --15 back/exit(14)
   { load=nil, save=fieldDeviceIdSelect, display=fieldCommandDisplay }, --16 device(15)
   { load=nil, save=fieldFolderDeviceOpen, display=fieldFolderDisplay }, --17 deviceFOLDER(16)
+  { load=nil, save=fieldDryRunSave, display=fieldDryRunDisplay }, --18 DRYRUN(17)
 }
 
 local function parseParameterInfoMessage(data)
@@ -556,21 +774,18 @@ local function parseParameterInfoMessage(data)
       field.type = bit32.band(fieldData[offset+1], 0x7f)
       field.hidden = bit32.btest(fieldData[offset+1], 0x80) or nil
       field.name, offset = fieldGetStrOrOpts(fieldData, offset+2, field.name)
-      local fn = functions[field.type+1]
-      if fn and fn.load then
-        fn.load(field, fieldData, offset)
+      if functions[field.type+1].load then
+        functions[field.type+1].load(field, fieldData, offset)
       end
       if field.min == 0 then field.min = nil end
       if field.max == 0 then field.max = nil end
     end
 
+    maybeAutoEnterVtx(field)
+    maybeAutoSaveConfigForVtx()
+
     fieldChunk = 0
     fieldData = nil
-
-    -- Last field loaded, add the list of devices to the end
-    if #loadQ == 0 then
-      createDeviceFields()
-    end
 
     -- Return value is if the screen should be updated
     -- If deviceId is TX module, then the Bad/Good drives the update; for other
@@ -612,7 +827,7 @@ local function parseElrsV1Message(data)
   fieldTimeout = getTime() + 0xFFFF
 end
 
-local function refreshNext()
+local function refreshNext(skipPush)
   local command, data, forceRedraw
   repeat
     command, data = crossfireTelemetryPop()
@@ -624,7 +839,7 @@ local function refreshNext()
       end
       if #loadQ > 0 then
         fieldTimeout = 0 -- request next chunk immediately
-      elseif fieldPopup then
+      elseif fieldPopup and not fieldPopup.dryRun then
         fieldTimeout = getTime() + fieldPopup.timeout
       end
     elseif command == 0x2D then
@@ -635,27 +850,30 @@ local function refreshNext()
     end
   until command == nil
 
+  -- Don't even bother with return value, skipPush implies redraw
+  if skipPush then return end
+
   local time = getTime()
   if fieldPopup then
-    if time > fieldTimeout and fieldPopup.status ~= 3 then
+    if not fieldPopup.dryRun and time > fieldTimeout and fieldPopup.status ~= 3 then
       crossfireTelemetryPush(0x2D, { deviceId, handsetId, fieldPopup.id, 6 }) -- lcsQuery
       fieldTimeout = time + fieldPopup.timeout
     end
-  elseif time > devicesRefreshTimeout and fields_count < 1 then
+  elseif time > devicesRefreshTimeout and #devices == 0 then
     forceRedraw = true -- handles initial screen draw
     devicesRefreshTimeout = time + 100 -- 1s
     crossfireTelemetryPush(0x28, { 0x00, 0xEA })
   elseif time > linkstatTimeout then
-    if not deviceIsELRS_TX and #loadQ == 0 then
-      goodBadPkt = ""
-    else
+    if deviceIsELRS_TX then
       crossfireTelemetryPush(0x2D, { deviceId, handsetId, 0x0, 0x0 }) --request linkstat
+    else
+      goodBadPkt = ""
     end
     linkstatTimeout = time + 100
   elseif time > fieldTimeout and fields_count ~= 0 then
     if #loadQ > 0 then
       crossfireTelemetryPush(0x2C, { deviceId, handsetId, loadQ[#loadQ], fieldChunk })
-      fieldTimeout = time + 50 -- 0.5s
+      fieldTimeout = time + 500 -- 5s
     end
   end
 
@@ -677,7 +895,6 @@ local function lcd_title_color()
   local EGREEN = lcd.RGB(0x9f, 0xc7, 0x6f)
   local EGREY1 = lcd.RGB(0x91, 0xb2, 0xc9)
   local EGREY2 = lcd.RGB(0x6f, 0x62, 0x7f)
-  local barHeight = 30
 
   -- Field display area (white w/ 2px green border)
   lcd.setColor(CUSTOM_COLOR, EGREEN)
@@ -692,19 +909,18 @@ local function lcd_title_color()
   lcd.drawRectangle(LCD_W - textSize, 1 , textSize - 1, barHeight - 2, CUSTOM_COLOR) -- left and bottom line only 1px, make it look bevelled
   lcd.setColor(CUSTOM_COLOR, BLACK)
   if titleShowWarn then
-    lcd.drawText(COL1 + 1, 4, elrsFlagsInfo, CUSTOM_COLOR)
+    lcd.drawText(COL1 + 1, barTextSpacing, elrsFlagsInfo, CUSTOM_COLOR)
   else
-    local title = fields_count > 0 and deviceName or "Loading..."
-    lcd.drawText(COL1 + 1, 4, title, CUSTOM_COLOR)
-    lcd.drawText(LCD_W - 5, 4, goodBadPkt, RIGHT + BOLD + CUSTOM_COLOR)
+    lcd.drawText(COL1 + 1, barTextSpacing, deviceName, CUSTOM_COLOR)
+    lcd.drawText(LCD_W - 5, barTextSpacing, goodBadPkt, RIGHT + BOLD + CUSTOM_COLOR)
   end
   -- progress bar
   if #loadQ > 0 and fields_count > 0 then
     local barW = (COL2-4) * (fields_count - #loadQ) / fields_count
     lcd.setColor(CUSTOM_COLOR, EBLUE)
-    lcd.drawFilledRectangle(2, 2+20, barW, barHeight-5-20, CUSTOM_COLOR)
+    lcd.drawFilledRectangle(2, barTextSpacing/2+textSize, barW, barTextSpacing, CUSTOM_COLOR)
     lcd.setColor(CUSTOM_COLOR, WHITE)
-    lcd.drawFilledRectangle(2+barW, 2+20, COL2-2-barW, barHeight-5-20, CUSTOM_COLOR)
+    lcd.drawFilledRectangle(2+barW, barTextSpacing/2+textSize, COL2-2-barW, barTextSpacing, CUSTOM_COLOR)
   end
 end
 
@@ -725,8 +941,7 @@ local function lcd_title_bw()
     if titleShowWarn then
       lcd.drawText(COL1, 1, elrsFlagsInfo, INVERS)
     else
-      local title = fields_count > 0 and deviceName or "Loading..."
-      lcd.drawText(COL1, 1, title, INVERS)
+      lcd.drawText(COL1, 1, deviceName, INVERS)
     end
   end
 end
@@ -735,17 +950,6 @@ local function lcd_warn()
   lcd.drawText(COL1, textSize*2, "Error:")
   lcd.drawText(COL1, textSize*3, elrsFlagsInfo)
   lcd.drawText(LCD_W/2, textSize*5, "[OK]", BLINK + INVERS + CENTER)
-end
-
-local function reloadCurField()
-  local field = getField(lineIndex)
-  if not field or not field.id then
-    return
-  end
-  fieldTimeout = 0
-  fieldChunk = 0
-  fieldData = nil
-  loadQ[#loadQ+1] = field.id
 end
 
 local function reloadRelatedFields(field)
@@ -772,6 +976,8 @@ local function reloadRelatedFields(field)
   loadQ[#loadQ+1] = field.id
   -- with a short delay to allow the module EEPROM to commit
   fieldTimeout = getTime() + 20
+  -- Also push the next bad/good update further out
+  linkstatTimeout = fieldTimeout + 100
 end
 
 local function handleDevicePageEvent(event)
@@ -783,6 +989,19 @@ local function handleDevicePageEvent(event)
     end
   end
 
+  local totalVisible = getFieldCount()
+  if totalVisible == 0 then
+    return
+  end
+  if lineIndex > totalVisible then
+    lineIndex = totalVisible
+  elseif lineIndex < 1 then
+    lineIndex = 1
+  end
+  if pageOffset >= lineIndex then
+    pageOffset = math.max(lineIndex - 1, 0)
+  end
+
   if event == EVT_VIRTUAL_EXIT then -- Cancel edit / go up a folder / reload all
     if edit then
       edit = nil
@@ -790,7 +1009,7 @@ local function handleDevicePageEvent(event)
     else
       if currentFolderId == nil and #loadQ == 0 then -- only do reload if we're in the root folder and finished loading
         if deviceId ~= 0xEE then
-          changeDeviceId(0xEE) --change device id clear the fields_count, therefore the next ping will do reloadAllField()
+          changeDeviceId(0xEE)
         else
           reloadAllField()
         end
@@ -806,21 +1025,16 @@ local function handleDevicePageEvent(event)
     else
       local field = getField(lineIndex)
       if field and field.name then
-        local ftype = field.type or 99
-        if ftype < 10 then
+        -- Editable fields
+        if not field.grey and field.type < 10 then
           edit = not edit
+          if not edit then
+            reloadRelatedFields(field)
+          end
         end
         if not edit then
-          if ftype < 10 then
-            -- Editable fields
-            reloadRelatedFields(field)
-          elseif ftype == 13 then
-            -- Command
-            reloadCurField()
-          end
-          local fn = functions[ftype+1]
-          if fn and fn.save then
-            fn.save(field)
+          if functions[field.type+1].save then
+            functions[field.type+1].save(field)
           end
         end
       end
@@ -842,6 +1056,9 @@ end
 
 -- Main
 local function runDevicePage(event)
+  if HEADLESS then
+    return
+  end
   handleDevicePageEvent(event)
 
   lcd_title()
@@ -860,13 +1077,12 @@ local function runDevicePage(event)
         local attr = lineIndex == (pageOffset+y)
           and ((edit and BLINK or 0) + INVERS)
           or 0
-        local ftype = field.type or 99
-        if ftype < 11 or ftype == 12 then -- if not folder, command, or back
-          lcd.drawText(COL1, y*textSize+textYoffset, field.name, 0)
+        local color = field.grey and COLOR_THEME_DISABLED or 0
+        if field.type < 11 or field.type == 12 then -- if not folder, command, or back
+          lcd.drawText(COL1, y * textSize + textYoffset, field.name or "", color)
         end
-        local fn = functions[ftype+1]
-        if fn and fn.display then
-          fn.display(field, y*textSize+textYoffset, attr)
+        if functions[field.type+1].display then
+          functions[field.type+1].display(field, y*textSize+textYoffset, attr, color)
         end
       end
     end
@@ -879,13 +1095,23 @@ local function popupCompat(t, m, e)
 end
 
 local function runPopupPage(event)
+  if HEADLESS then
+    fieldPopup = nil
+    return
+  end
+  if fieldPopup.dryRun then
+    handleDryRunPopup(event)
+    return
+  end
+
   if event == EVT_VIRTUAL_EXIT then
     crossfireTelemetryPush(0x2D, { deviceId, handsetId, fieldPopup.id, 5 }) -- lcsCancel
     fieldTimeout = getTime() + 200 -- 2s
   end
 
-  if fieldPopup.status == 0 and fieldPopup.lastStatus ~= 0 then -- stopped
-      popupCompat(fieldPopup.info, "Stopped!", event)
+  if fieldPopup.status == 0 and fieldPopup.lastStatus ~= 0 then -- success
+      local payloadInfo = lastPayloadHex and ("[" .. lastPayloadHex .. "]") or ""
+      popupCompat(fieldPopup.info, "Success " .. payloadInfo, event)
       reloadAllField()
       fieldPopup = nil
   elseif fieldPopup.status == 3 then -- confirmation required
@@ -893,20 +1119,30 @@ local function runPopupPage(event)
     fieldPopup.lastStatus = fieldPopup.status
     if result == "OK" then
       crossfireTelemetryPush(0x2D, { deviceId, handsetId, fieldPopup.id, 4 }) -- lcsConfirmed
-      fieldTimeout = getTime() + fieldPopup.timeout -- we are expecting an immediate response
+      fieldTimeout = getTime() + fieldPopup.timeout -- expect immediate response
       fieldPopup.status = 4
     elseif result == "CANCEL" then
       fieldPopup = nil
     end
   elseif fieldPopup.status == 2 then -- running
+
+    -- Added: build hex payload string
+    local payloadHex = string.format("x%02X%02X%02X%02X", deviceId, handsetId, fieldPopup.id, fieldPopup.status)
+
     if fieldChunk == 0 then
       commandRunningIndicator = (commandRunningIndicator % 4) + 1
     end
-    local result = popupCompat(fieldPopup.info .. " [" .. string.sub("|/-\\", commandRunningIndicator, commandRunningIndicator) .. "]", "Press [RTN] to exit", event)
+
+    -- Added payloadHex into popup text
+    local msg = fieldPopup.info .. " [" ..
+      string.sub("|/-\\", commandRunningIndicator, commandRunningIndicator) .. "] " .. payloadHex
+
+    local result = popupCompat(msg, "Press [RTN] to exit", event)
+
     fieldPopup.lastStatus = fieldPopup.status
     if result == "CANCEL" then
       crossfireTelemetryPush(0x2D, { deviceId, handsetId, fieldPopup.id, 5 }) -- lcsCancel
-      fieldTimeout = getTime() + fieldPopup.timeout -- we are expecting an immediate response
+      fieldTimeout = getTime() + fieldPopup.timeout
       fieldPopup = nil
     end
   end
@@ -946,18 +1182,22 @@ local function setLCDvar()
   if major ~= 1 then
     popupCompat = popupConfirmation
   end
-  if LCD_W == 480 then
+
+  if (lcd.RGB ~= nil) then
+    local ver, radio, maj, minor, rev, osname = getVersion()
+
+    if osname ~= nil and osname == "EdgeTX" then
+      textWidth, textSize = lcd.sizeText("Qg") -- determine standard font height for EdgeTX
+    else
+      textSize = 21                            -- use this for OpenTX
+    end
+
     COL1 = 3
-    COL2 = 240
-    maxLineIndex = 10
-    textYoffset = 10
-    textSize = 22 --textSize is text Height
-  elseif LCD_W == 320 then
-    COL1 = 3
-    COL2 = 160
-    maxLineIndex = 14
-    textYoffset = 10
-    textSize = 22
+    COL2 = LCD_W/2
+    barTextSpacing = 4
+    barHeight = textSize + barTextSpacing + barTextSpacing
+    textYoffset = 2 * barTextSpacing + 2
+    maxLineIndex = math.floor(((LCD_H - barHeight - textYoffset) / textSize)) - 1
   else
     if LCD_W == 212 then
       COL2 = 110
@@ -979,12 +1219,48 @@ local function setMock()
   -- Setup fields to display if running in Simulator
   local _, rv = getVersion()
   if string.sub(rv, -5) ~= "-simu" then return end
-  local mock = loadScript("mockup/elrsmock.lua")
+  local mock = loadScript("../mockup/elrsmock.lua")
   if mock == nil then return end
   fields, goodBadPkt, deviceName = mock()
   fields_count = #fields - 1
   loadQ = { fields_count }
   deviceIsELRS_TX = true
+end
+
+local function checkCrsfModule()
+  -- Loop through the modules and look for one set to CRSF (5)
+  for modIdx = 0, 1 do
+    local mod = model.getModule(modIdx)
+    if mod and (mod.Type == nil or mod.Type == 5) then
+      -- CRSF found
+      checkCrsfModule = nil
+      return 0
+    end
+  end
+
+  -- No CRSF module found, save an error message for run()
+  lcd.clear()
+  local y = 0
+  lcd.drawText(2, y, "  No ExpressLRS", MIDSIZE)
+  y = y + (textSize * 2) - 2
+  local msgs = {
+    " Enable a CRSF Internal",
+    "   or External module in",
+    "       Model settings",
+    "  If module is internal",
+    " also set Internal RF to",
+    " CRSF in SYS->Hardware",
+  }
+  for i, msg in ipairs(msgs) do
+    lcd.drawText(2, y, msg)
+    y = y + textSize
+    if i == 3 then
+      lcd.drawLine(0, y, LCD_W, y, SOLID, INVERS)
+      y = y + 2
+    end
+  end
+
+  return 0
 end
 
 -- Init
@@ -997,14 +1273,13 @@ end
 
 -- Main
 local function run(event, touchState)
-  if event == nil then
-    error("Cannot be run as a model script!")
-    return 2
-  end
-
-  local forceRedraw = refreshNext()
+  if event == nil then return 2 end
+  if checkCrsfModule then return checkCrsfModule() end
 
   event = (touch2evt and touch2evt(event, touchState)) or event
+  -- If ENTER pressed, skip any pushing this loop to reserve queue for the save command
+  local forceRedraw = refreshNext(event == EVT_VIRTUAL_ENTER)
+
   if fieldPopup ~= nil then
     runPopupPage(event)
   elseif event ~= 0 or forceRedraw or edit then
