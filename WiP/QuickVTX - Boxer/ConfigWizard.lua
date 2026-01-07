@@ -1,12 +1,12 @@
 
--- TNS|ConfigWizard|TNE
+-- TNS|QVTx - ConfigWizard|TNE
 local childPath = "_internal/vtx_auto.lua"
-local cfgPath = "vtxConfig_auto.cfg"
+local cfgPathTemplate = "_internal/vtxConfig_%s.cfg"
 local child = nil
 local done = false
 local errorMsg = nil
 local page = 0
-local switches = { "SA", "SB", "SC", "SD" }
+local switches = { "--", "SA", "SB", "SC", "SD" }
 local switchIndex = 1
 local positions = { 2, 3, 4, 5, 6 }
 local positionIndex = 1
@@ -18,6 +18,58 @@ local channelIndex = 1
 local posIndex = 1
 local posSelections = {}
 local posField = "band"
+local deviceIdHash = nil
+local baseConfigWritten = false
+local licenseWritten = false
+
+local function toHexByte(val)
+  if not val then
+    return ""
+  end
+  return string.format("0x%02X", val)
+end
+
+local function computeDeviceIdHash(commandId)
+  local ver, radio, maj, minor, rev, osname = getVersion()
+  local input = (ver or "") .. "|" .. (radio or "") .. "|" .. (osname or "") .. "|" .. tostring(commandId or "")
+  local hash = 5381
+  if bit32 then
+    for i = 1, #input do
+      hash = bit32.band(bit32.lshift(hash, 5) + hash + string.byte(input, i), 0xFFFFFFFF)
+    end
+  else
+    for i = 1, #input do
+      hash = (hash * 33 + string.byte(input, i)) % 4294967296
+    end
+  end
+  return string.format("%08X", hash)
+end
+
+local function cfgPathForHash(hash)
+  if not hash or hash == "" then
+    return nil
+  end
+  return string.format(cfgPathTemplate, hash)
+end
+
+local function writeLicenseFile(hash)
+  if not hash or hash == "" then
+    return false
+  end
+  local filename = "_internal/license_" .. hash .. ".txt"
+  local existing = io.open(filename, "r")
+  if existing then
+    io.close(existing)
+    return true
+  end
+  local file = io.open(filename, "w")
+  if not file then
+    return false
+  end
+  io.write(file, "DEVICEID = ", hash, "\n")
+  io.close(file)
+  return true
+end
 
 local function isPageNext(event)
   return event == EVT_PAGEDN_FIRST
@@ -51,10 +103,10 @@ local function init()
   end
 end
 
-local function readCfgLines()
+local function readCfgLines(path)
   local lines = {}
   local content = ""
-  local file = io.open(cfgPath, "r")
+  local file = io.open(path, "r")
   if file then
     local ok, data = pcall(function() return io.read(file, "*a") end)
     if ok and data then
@@ -68,8 +120,53 @@ local function readCfgLines()
   return lines
 end
 
-local function appendCfgLine(line)
-  local file = io.open(cfgPath, "a")
+local function getCommandId()
+  local commandId = nil
+  if child and type(child.getLastCommandId) == "function" then
+    commandId = child.getLastCommandId()
+  elseif VTX_AUTO_LAST_COMMAND_ID then
+    commandId = VTX_AUTO_LAST_COMMAND_ID
+  end
+  return commandId
+end
+
+local function getDeviceIdHash()
+  if deviceIdHash then
+    return deviceIdHash
+  end
+  local commandId = getCommandId()
+  if not commandId then
+    return nil
+  end
+  deviceIdHash = computeDeviceIdHash(commandId)
+  return deviceIdHash
+end
+
+local function writeBaseConfig()
+  local commandId = getCommandId()
+  if not commandId then
+    return false
+  end
+  deviceIdHash = computeDeviceIdHash(commandId)
+  local path = cfgPathForHash(deviceIdHash)
+  if not path then
+    return false
+  end
+  local file = io.open(path, "w")
+  if not file then
+    return false
+  end
+  local bandId = commandId - 4
+  local channelId = commandId - 3
+  io.write(file, "Band: ", toHexByte(bandId), "\n")
+  io.write(file, "Channel: ", toHexByte(channelId), "\n")
+  io.write(file, "Command: ", toHexByte(commandId), "\n")
+  io.close(file)
+  return true
+end
+
+local function appendCfgLine(path, line)
+  local file = io.open(path, "a")
   if not file then
     return false
   end
@@ -78,8 +175,8 @@ local function appendCfgLine(line)
   return true
 end
 
-local function writeCfgLines(lines)
-  local file = io.open(cfgPath, "w")
+local function writeCfgLines(path, lines)
+  local file = io.open(path, "w")
   if not file then
     return false
   end
@@ -91,9 +188,14 @@ local function writeCfgLines(lines)
 end
 
 local function updateCfgKey(key, value)
-  local lines = readCfgLines()
+  local hash = getDeviceIdHash()
+  local path = cfgPathForHash(hash)
+  if not path then
+    return false
+  end
+  local lines = readCfgLines(path)
   if #lines == 0 then
-    return appendCfgLine(key .. ": " .. value)
+    return appendCfgLine(path, key .. ": " .. value)
   end
   local filtered = {}
   for i = 1, #lines do
@@ -102,7 +204,7 @@ local function updateCfgKey(key, value)
     end
   end
   filtered[#filtered + 1] = key .. ": " .. value
-  return writeCfgLines(filtered)
+  return writeCfgLines(path, filtered)
 end
 
 local function updateCfgSwitch(value)
@@ -114,9 +216,14 @@ local function updateCfgPositions(value)
 end
 
 local function updateCfgPositionValues(values)
-  local lines = readCfgLines()
+  local hash = getDeviceIdHash()
+  local path = cfgPathForHash(hash)
+  if not path then
+    return false
+  end
+  local lines = readCfgLines(path)
   if #lines == 0 then
-    local file = io.open(cfgPath, "a")
+    local file = io.open(path, "a")
     if not file then
       return false
     end
@@ -137,7 +244,7 @@ local function updateCfgPositionValues(values)
     local v = values[i]
     filtered[#filtered + 1] = "Pos" .. i .. ": " .. v.band .. v.channel
   end
-  return writeCfgLines(filtered)
+  return writeCfgLines(path, filtered)
 end
 
 local function loadSelectionForPosition(index)
@@ -183,9 +290,22 @@ local function run(event, touchState)
     end
 
     if done then
+      if not baseConfigWritten then
+        baseConfigWritten = writeBaseConfig()
+        if not baseConfigWritten then
+          errorMsg = "Config write failed"
+          return 0
+        end
+      end
+      if not licenseWritten then
+        local hash = getDeviceIdHash()
+        licenseWritten = writeLicenseFile(hash)
+      end
       lcd.clear()
-    lcd.drawText(2, 2, "VTX Admin initialized")
-    lcd.drawText(2, 16, "Press PAGE> to continue")
+      local hash = getDeviceIdHash()
+      local idText = hash and ("Device ID: " .. hash) or "Device ID: N/A"
+      lcd.drawText(2, 2, idText)
+      lcd.drawText(2, 16, "Press PAGE> to continue")
       if isPageNext(event) then
         page = 1
       end
@@ -196,8 +316,18 @@ local function run(event, touchState)
     elseif isRotPrev(event) then
       switchIndex = ((switchIndex - 2) % #switches) + 1
     elseif isPageNext(event) then
-      if updateCfgSwitch(switches[switchIndex]) then
-        page = 2
+      local selectedSwitch = switches[switchIndex]
+      if updateCfgSwitch(selectedSwitch) then
+        if selectedSwitch == "--" then
+          positionsCount = 0
+          if updateCfgPositions(positionsCount) and updateCfgPositionValues({}) then
+            page = 4
+          else
+            errorMsg = "CFG write failed"
+          end
+        else
+          page = 2
+        end
       else
         errorMsg = "CFG write failed"
       end
@@ -267,8 +397,15 @@ local function run(event, touchState)
 
     lcd.clear()
     lcd.drawText(2, 2, "Pos " .. posIndex .. "/" .. positionsCount)
-    lcd.drawText(2, 16, "Band: " .. bands[bandIndex])
-    lcd.drawText(2, 30, "Channel: " .. channels[channelIndex])
+    local bandLabel = "Band: " .. bands[bandIndex]
+    local channelLabel = "Channel: " .. channels[channelIndex]
+    if posField == "band" then
+      bandLabel = ">" .. bandLabel
+    else
+      channelLabel = ">" .. channelLabel
+    end
+    lcd.drawText(2, 16, bandLabel)
+    lcd.drawText(2, 30, channelLabel)
     lcd.drawText(2, 44, "ROTARY change, PAGE> next")
   else
     lcd.clear()

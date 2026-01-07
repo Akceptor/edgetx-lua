@@ -34,6 +34,7 @@ local titleShowWarn = nil
 local titleShowWarnTimeout = 100
 local exitscript = 0
 local lastPayloadHex = nil
+local lastCommandId = nil
 
 local FIELD_TYPE_COMMAND = 13
 local FIELD_TYPE_DRYRUN = 17
@@ -522,29 +523,9 @@ local function fieldDryRunSave(field)
     return nil
   end
 
-  local function toHexByte(val)
-    if not val then
-      return ""
-    end
-    return string.format("0x%02X", val)
-  end
-
-  local function writeVtxConfigFile(bandId, channelId, commandId)
-    local file = io.open("vtxConfig_auto.cfg", "w")
-    if not file then
-      return false
-    end
-    io.write(file, "Band: ", toHexByte(bandId), "\n")
-    io.write(file, "Channel: ", toHexByte(channelId), "\n")
-    io.write(file, "Command: ", toHexByte(commandId), "\n")
-    io.close(file)
-    return true
-  end
-
   local commandId = commandField.id
-  local bandId = commandId and (commandId - 4) or nil
-  local channelId = commandId and (commandId - 3) or nil
-  local wroteConfig = writeVtxConfigFile(bandId, channelId, commandId)
+  lastCommandId = commandId
+  VTX_AUTO_LAST_COMMAND_ID = commandId
 
   for i = 1, #fields do
     local sibling = fields[i]
@@ -559,9 +540,6 @@ local function fieldDryRunSave(field)
 
   if #lines == 1 then
     lines[#lines+1] = "No recent parameter payloads"
-  end
-  if not wroteConfig then
-    lines[#lines+1] = "vtxConfig_auto.cfg write failed"
   end
 
   local title = "[" .. (commandField.name or "command") .. "] save config"
@@ -885,6 +863,10 @@ local function refreshNext(skipPush)
   end
 
   return forceRedraw
+end
+
+local function getLastCommandId()
+  return lastCommandId
 end
 
 local lcd_title -- holds function that is color/bw version
@@ -1289,4 +1271,4 @@ local function run(event, touchState)
   return exitscript
 end
 
-return { init=init, run=run }
+return { init=init, run=run, getLastCommandId=getLastCommandId }

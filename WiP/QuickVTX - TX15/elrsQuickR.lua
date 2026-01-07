@@ -11,7 +11,7 @@ local CHANNEL_COMMAND
 local APPLY_COMMAND
 -- This is static as well, just put it here
 local APPLY_VALUE = 0x01
-local cfgPathTemplate = "vtxConfig_%s.cfg"
+local cfgPathTemplate = "_internal/vtxConfig_%s.cfg"
 local cfgPathResolved = nil
 local childPath = "_internal/vtx_auto.lua"
 local child = nil
@@ -830,7 +830,7 @@ local function checkLicense()
     return false, "Command missing in vtxConfig"
   end
   local deviceHash = computeDeviceIdHash(APPLY_COMMAND)
-  local licenseName = "license_" .. deviceHash .. ".txt"
+  local licenseName = "_internal/license_" .. deviceHash .. ".txt"
   local lines = readFileLines(licenseName)
   if not lines then
     lines = readFileLines("/SCRIPTS/TOOLS/" .. licenseName)

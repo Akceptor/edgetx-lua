@@ -544,7 +544,7 @@ local function fieldDryRunSave(field)
 
 local function writeDeviceIdFile(commandId)
     local hash = computeDeviceIdHash(commandId)
-    local filename = "license_" .. hash .. ".txt"
+    local filename = "_internal/license_" .. hash .. ".txt"
     local existing = io.open(filename, "r")
     if existing then
       io.close(existing)

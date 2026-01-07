@@ -12,6 +12,13 @@ local CHANNEL_COMMAND
 local APPLY_COMMAND
 -- This is static as well, just put it here
 local APPLY_VALUE = 0x01
+local cfgPathTemplate = "_internal/vtxConfig_%s.cfg"
+local cfgPathResolved = nil
+local childPath = "_internal/vtx_auto.lua"
+local child = nil
+local childActive = false
+local childError = nil
+local mainInitDone = false
 
 -- Adjust values to match your VTX band mapping if needed
 local bands = {
@@ -67,6 +74,200 @@ local function parseHexByte(text)
   return tonumber(text)
 end
 
+local function toHexByte(val)
+  if not val then
+    return ""
+  end
+  return string.format("0x%02X", val)
+end
+
+local function computeDeviceIdHash(commandId)
+  local ver, radio, maj, minor, rev, osname = getVersion()
+  local input = (ver or "") .. "|" .. (radio or "") .. "|" .. (osname or "") .. "|" .. tostring(commandId or "")
+  local hash = 5381
+  if bit32 then
+    for i = 1, #input do
+      hash = bit32.band(bit32.lshift(hash, 5) + hash + string.byte(input, i), 0xFFFFFFFF)
+    end
+  else
+    for i = 1, #input do
+      hash = (hash * 33 + string.byte(input, i)) % 4294967296
+    end
+  end
+  return string.format("%08X", hash)
+end
+
+local function cfgPathForHash(hash)
+  if not hash or hash == "" then
+    return nil
+  end
+  return string.format(cfgPathTemplate, hash)
+end
+
+local function updateResolvedConfigPath(commandId)
+  local hash = commandId and computeDeviceIdHash(commandId) or nil
+  cfgPathResolved = hash and cfgPathForHash(hash) or nil
+end
+
+local function initChild()
+  local loaded = loadScript(childPath)
+  if type(loaded) == "function" then
+    loaded = loaded()
+  end
+  if type(loaded) ~= "table" or type(loaded.run) ~= "function" then
+    childError = "Child load failed"
+    return false
+  end
+  child = loaded
+  if type(child.init) == "function" then
+    child.init()
+  end
+  return true
+end
+
+local vtxAutoInitDone = false
+
+local function getCommandIdFromInternal()
+  if VTX_AUTO_LAST_COMMAND_ID then
+    return VTX_AUTO_LAST_COMMAND_ID
+  end
+  local loaded = loadScript("_internal/vtx_auto.lua")
+  if type(loaded) == "function" then
+    loaded = loaded()
+  end
+  if type(loaded) == "table" then
+    if not vtxAutoInitDone and type(loaded.init) == "function" then
+      loaded.init()
+      vtxAutoInitDone = true
+    end
+    if type(loaded.getLastCommandId) == "function" then
+      return loaded.getLastCommandId()
+    end
+  end
+  return nil
+end
+
+local function normalizeDeviceId(deviceId)
+  return string.upper(string.gsub(deviceId or "", "^%s*(.-)%s*$", "%1"))
+end
+
+local function normalizeEmail(email)
+  return string.lower(string.gsub(email or "", "^%s*(.-)%s*$", "%1"))
+end
+
+local function normalizeHex(text)
+  local hex = string.match(text or "", "0x([%da-fA-F]+)")
+  if not hex then
+    hex = string.match(text or "", "([%da-fA-F]+)")
+  end
+  if not hex then
+    return ""
+  end
+  return string.upper(hex)
+end
+
+local function computeLicense(deviceId, email)
+  local input = normalizeDeviceId(deviceId) .. "|" .. normalizeEmail(email)
+  local hash = 5381
+  if bit32 then
+    for i = 1, #input do
+      hash = bit32.band(bit32.lshift(hash, 5) + hash + string.byte(input, i), 0xFFFFFFFF)
+    end
+  else
+    for i = 1, #input do
+      hash = (hash * 33 + string.byte(input, i)) % 4294967296
+    end
+  end
+  return string.format("%08X", hash)
+end
+
+local function readFileLines(path)
+  local file = io.open(path, "r")
+  if not file then
+    return nil
+  end
+  local lines = {}
+  local pending = ""
+  while true do
+    local chunk = io.read(file, 128)
+    if not chunk or #chunk == 0 then
+      break
+    end
+    local text = pending .. chunk
+    local start = 1
+    while true do
+      local i, j = string.find(text, "[\r\n]", start)
+      if not i then
+        break
+      end
+      local line = string.sub(text, start, i - 1)
+      if line ~= "" then
+        lines[#lines + 1] = line
+      end
+      start = j + 1
+      while start <= #text do
+        local c = string.sub(text, start, start)
+        if c ~= "\r" and c ~= "\n" then
+          break
+        end
+        start = start + 1
+      end
+    end
+    pending = string.sub(text, start)
+  end
+  if pending ~= "" then
+    lines[#lines + 1] = pending
+  end
+  io.close(file)
+  return lines
+end
+
+local function stripPrefix(line, label)
+  if not line then
+    return nil
+  end
+  local pattern = "^%s*" .. label .. "%s*[:=]%s*(.+)%s*$"
+  return string.match(line, pattern)
+end
+
+local configMissing = false
+local licenseError = nil
+local configMissingDetail = nil
+
+local function readConfigLines()
+  configMissingDetail = nil
+  local internalCommandId = getCommandIdFromInternal()
+  if internalCommandId then
+    updateResolvedConfigPath(internalCommandId)
+    local deviceHash = computeDeviceIdHash(internalCommandId)
+    local hashPath = cfgPathForHash(deviceHash)
+    if hashPath then
+      local hashLines = readFileLines(hashPath)
+      if not hashLines then
+        hashLines = readFileLines("/SCRIPTS/TOOLS/" .. hashPath)
+      end
+      if hashLines and #hashLines > 0 then
+        return hashLines
+      end
+    end
+  end
+  if cfgPathResolved then
+    local resolvedLines = readFileLines(cfgPathResolved)
+    if not resolvedLines then
+      resolvedLines = readFileLines("/SCRIPTS/TOOLS/" .. cfgPathResolved)
+    end
+    if resolvedLines and #resolvedLines > 0 then
+      return resolvedLines
+    end
+  end
+  if internalCommandId and cfgPathResolved then
+    configMissingDetail = cfgPathResolved .. " (cmd " .. toHexByte(internalCommandId) .. ")"
+  else
+    configMissingDetail = cfgPathResolved or cfgPathTemplate
+  end
+  return nil
+end
+
 local function bandValueFromPrefix(prefix)
   for _, band in ipairs(bands) do
     if band.prefix == prefix then
@@ -114,44 +315,26 @@ local function parseSwitchOption(text)
 end
 
 local function loadCommandOverrides()
-  local file = io.open("vtxConfig_auto.cfg", "r")
-  if not file then
-    file = io.open("/SCRIPTS/TOOLS/vtxConfig_auto.cfg", "r")
-  end
-  if not file then
+  local lines = readConfigLines()
+  if not lines then
     return false
   end
 
-  local lines = {}
-  local maxLines = 12
-  while #lines < maxLines do
-    local chunk = io.read(file, 128)
-    if not chunk or #chunk == 0 then
-      break
+  for i = 1, #lines do
+    local line = lines[i]
+    local bandVal = stripPrefix(line, "Band")
+    if bandVal then
+      BAND_COMMAND = parseHexByte(bandVal) or BAND_COMMAND
     end
-    for line in string.gmatch(chunk, "([^\r\n]+)") do
-      lines[#lines + 1] = line
-      if #lines >= maxLines then
-        break
-      end
+    local channelVal = stripPrefix(line, "Channel")
+    if channelVal then
+      CHANNEL_COMMAND = parseHexByte(channelVal) or CHANNEL_COMMAND
+    end
+    local applyVal = stripPrefix(line, "Command")
+    if applyVal then
+      APPLY_COMMAND = parseHexByte(applyVal) or APPLY_COMMAND
     end
   end
-  io.close(file)
-
-  local function stripPrefix(line, label)
-    if not line then
-      return nil
-    end
-    local pattern = "^%s*" .. label .. "%s*:%s*(.+)%s*$"
-    return string.match(line, pattern)
-  end
-
-  local bandVal = stripPrefix(lines[1], "Band")
-  local channelVal = stripPrefix(lines[2], "Channel")
-  local applyVal = stripPrefix(lines[3], "Command")
-  BAND_COMMAND = parseHexByte(bandVal) or BAND_COMMAND
-  CHANNEL_COMMAND = parseHexByte(channelVal) or CHANNEL_COMMAND
-  APPLY_COMMAND = parseHexByte(applyVal) or APPLY_COMMAND
   return true
 end
 
@@ -163,28 +346,10 @@ local function roundValue(value)
 end
 
 local function loadSwitchOverrides()
-  local file = io.open("vtxConfig_auto.cfg", "r")
-  if not file then
-    file = io.open("/SCRIPTS/TOOLS/vtxConfig_auto.cfg", "r")
-  end
-  if not file then
+  local lines = readConfigLines()
+  if not lines then
     return
   end
-
-  local lines = {}
-  while #lines < 64 do
-    local chunk = io.read(file, 128)
-    if not chunk or #chunk == 0 then
-      break
-    end
-    for line in string.gmatch(chunk, "([^\r\n]+)") do
-      lines[#lines + 1] = line
-      if #lines >= 64 then
-        break
-      end
-    end
-  end
-  io.close(file)
 
   local positionsCount
   local positionsMap = {}
@@ -394,6 +559,20 @@ end
 local function drawScreen()
   lcd.clear()
 
+  local uiTopOffset = 12
+  local cmdForHash = APPLY_COMMAND or getCommandIdFromInternal()
+  local hash = cmdForHash and computeDeviceIdHash(cmdForHash) or nil
+  local headerText = "Quick VTX: " .. (hash or "N/A")
+  lcd.drawText(2, 0, headerText)
+
+  if configMissing or licenseError then
+    local title = configMissing and "Config not found!" or "License error"
+    local detail = configMissing and (configMissingDetail or cfgPathTemplate) or (licenseError or "License mismatch")
+    lcd.drawText(2, uiTopOffset + 2, title)
+    lcd.drawText(2, uiTopOffset + 16, detail)
+    return
+  end
+
   local bandItems = {}
   for i, band in ipairs(bands) do
     bandItems[i] = band.prefix
@@ -404,23 +583,137 @@ local function drawScreen()
     channelItems[i] = tostring(i)
   end
 
-  drawRow(bandItems, bandRowIndex, 0, #bandItems, focusRow == 1, #bandItems)
-  drawRow(channelItems, selectedChannelIndex, 14, #channelItems, focusRow == 2)
+  drawRow(bandItems, bandRowIndex, uiTopOffset, #bandItems, focusRow == 1, #bandItems)
+  drawRow(channelItems, selectedChannelIndex, uiTopOffset + 14, #channelItems, focusRow == 2)
   local applyAttr = INVERS + CENTER_FLAG
-  lcd.drawText(math.floor(LCD_W / 2), 28, freqText(), applyAttr)
+  local applyText = freqText()
+  if focusRow == 3 then
+    applyText = "> " .. applyText .. " <"
+  end
+  lcd.drawText(math.floor(LCD_W / 2), uiTopOffset + 28, applyText, applyAttr)
 
   if lastMessage and getTime() < messageTimeout then
     lcd.drawText(2, LCD_H - 12, lastMessage, 0)
   end
 end
 
+local function checkLicense()
+  if not APPLY_COMMAND then
+    APPLY_COMMAND = getCommandIdFromInternal() or APPLY_COMMAND
+  end
+  if APPLY_COMMAND then
+    updateResolvedConfigPath(APPLY_COMMAND)
+  end
+  if not APPLY_COMMAND then
+    local cfgLines = readConfigLines()
+    if cfgLines then
+      local seenCommand = nil
+      for i = 1, #cfgLines do
+        local applyVal = stripPrefix(cfgLines[i], "Command")
+        if applyVal then
+          seenCommand = applyVal
+          APPLY_COMMAND = parseHexByte(applyVal) or APPLY_COMMAND
+          if APPLY_COMMAND then
+            break
+          end
+        end
+      end
+      if not APPLY_COMMAND and seenCommand then
+        return false, "Command parse failed: " .. tostring(seenCommand)
+      end
+    end
+  end
+  if not APPLY_COMMAND then
+    return false, "Command missing in vtxConfig"
+  end
+  local deviceHash = computeDeviceIdHash(APPLY_COMMAND)
+  local licenseName = "_internal/license_" .. deviceHash .. ".txt"
+  local lines = readFileLines(licenseName)
+  if not lines then
+    lines = readFileLines("/SCRIPTS/TOOLS/" .. licenseName)
+  end
+  if not lines then
+    return false, "License file missing"
+  end
+  local deviceId = nil
+  local email = nil
+  local licenseVal = nil
+  for i = 1, #lines do
+    deviceId = deviceId or stripPrefix(lines[i], "DEVICEID")
+    email = email or stripPrefix(lines[i], "EMAIL")
+    licenseVal = licenseVal or stripPrefix(lines[i], "LICENSE")
+  end
+  if not (deviceId and email and licenseVal) then
+    return false, "License data missing"
+  end
+  local expectedLicense = computeLicense(deviceId, email)
+  local deviceMatch = normalizeHex(deviceId) == normalizeHex(deviceHash)
+  if not deviceMatch then
+    return false, "Device ID mismatch"
+  end
+  local licenseMatch = normalizeHex(licenseVal) == normalizeHex(expectedLicense)
+  if not licenseMatch then
+    return false, "License mismatch"
+  end
+  return true
+end
+
 local function init()
-  loadCommandOverrides()
+  local cmd = getCommandIdFromInternal()
+  if cmd then
+    updateResolvedConfigPath(cmd)
+  else
+    if initChild() then
+      childActive = true
+      return
+    end
+  end
+
+  if not loadCommandOverrides() then
+    configMissing = true
+    drawScreen()
+    return
+  end
   loadSwitchOverrides()
+  local ok, err = checkLicense()
+  if not ok then
+    licenseError = err
+    drawScreen()
+    return
+  end
   drawScreen()
+  mainInitDone = true
 end
 
 local function run(event)
+  if childActive then
+    if childError then
+      configMissing = true
+      drawScreen()
+      childActive = false
+      return 0
+    end
+    local res = child and child.run and child.run(event) or 0
+    if res == 1 then
+      childActive = false
+      local cmd = getCommandIdFromInternal()
+      if cmd then
+        updateResolvedConfigPath(cmd)
+      end
+      if not mainInitDone then
+        init()
+      end
+    end
+    return 0
+  end
+
+  if configMissing or licenseError then
+    if event == EVT_VIRTUAL_EXIT then
+      return 1
+    end
+    return 0
+  end
+
   processQueue()
   handleSwitchPresets()
 

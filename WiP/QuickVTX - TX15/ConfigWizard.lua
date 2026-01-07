@@ -1,12 +1,12 @@
--- TNS|ConfigWizard|TNE
+-- TNS|QVTx - ConfigWizard|TNE
 local childPath = "_internal/vtx_auto.lua"
 local logoPath = "_internal/logo.png"
-local cfgPathTemplate = "vtxConfig_%s.cfg"
+local cfgPathTemplate = "_internal/vtxConfig_%s.cfg"
 local child = nil
 local done = false
 local errorMsg = nil
 local page = 0
-local switches = { "SA", "SB", "SC", "SD" }
+local switches = { "--", "SA", "SB", "SC", "SD" }
 local switchIndex = 1
 local positions = { 2, 3, 4, 5, 6 }
 local positionIndex = 1
@@ -463,8 +463,18 @@ local function run(event, touchState)
     elseif isRotPrev(event) then
       switchIndex = ((switchIndex - 2) % #switches) + 1
     elseif isPageNext(event) then
-      if updateCfgSwitch(switches[switchIndex]) then
-        page = 2
+      local selectedSwitch = switches[switchIndex]
+      if updateCfgSwitch(selectedSwitch) then
+        if selectedSwitch == "--" then
+          positionsCount = 0
+          if updateCfgPositions(positionsCount) and updateCfgPositionValues({}) then
+            page = 4
+          else
+            errorMsg = "CFG write failed"
+          end
+        else
+          page = 2
+        end
       else
         errorMsg = "CFG write failed"
       end
