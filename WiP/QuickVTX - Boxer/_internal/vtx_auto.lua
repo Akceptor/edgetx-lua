@@ -1,4 +1,3 @@
--- TNS|VTX-CFG|TNE
 ---- #########################################################################
 ---- #                                                                       #
 ---- # Copyright (C) OpenTX, adapted for ExpressLRS                          #
