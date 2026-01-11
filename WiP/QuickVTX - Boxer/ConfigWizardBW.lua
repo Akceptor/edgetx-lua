@@ -74,15 +74,11 @@ end
 local function isPageNext(event)
   return event == EVT_PAGEDN_FIRST
           or event == EVT_PAGEDN_LONG
-          or event == EVT_VIRTUAL_NEXT
-          or event == EVT_VIRTUAL_NEXT_PAGE
 end
 
 local function isPagePrev(event)
   return event == EVT_PAGEUP_FIRST
           or event == EVT_PAGEUP_LONG
-          or event == EVT_VIRTUAL_PREV
-          or event == EVT_VIRTUAL_PREV_PAGE
 end
 
 local function isRotNext(event)
@@ -313,8 +309,8 @@ local function run(event, touchState)
       lcd.clear()
       local hash = getDeviceIdHash()
       local idText = hash and ("Device ID: " .. hash) or "Device ID: N/A"
-      lcd.drawText(2, 2, idText)
-      lcd.drawText(2, 16, "Press PAGE> to continue")
+      lcd.drawText(2, 2, idText, SMLSIZE)
+      lcd.drawText(2, 16, "Press PAGE> to continue", SMLSIZE)
       if isPageNext(event) then
         page = 1
       end
@@ -343,10 +339,10 @@ local function run(event, touchState)
     end
 
     lcd.clear()
-    lcd.drawText(2, 2, "Select switch")
-    lcd.drawText(2, 16, "Switch: " .. switches[switchIndex])
-    lcd.drawText(2, 30, "ROTARY change")
-    lcd.drawText(2, 44, "PAGE> save")
+    lcd.drawText(2, 2, "Select switch                  ", INVERS)
+    lcd.drawText(2, 16, "Switch: " .. switches[switchIndex], MIDSIZE)
+    lcd.drawText(2, 30, "ROTARY change", SMLSIZE)
+    lcd.drawText(2, 40, "PAGE> save", SMLSIZE)
   elseif page == 2 then
     if isRotNext(event) then
       positionIndex = (positionIndex % #positions) + 1
@@ -365,10 +361,10 @@ local function run(event, touchState)
     end
 
     lcd.clear()
-    lcd.drawText(2, 2, "Select positions")
-    lcd.drawText(2, 16, "Positions: " .. positions[positionIndex])
-    lcd.drawText(2, 30, "ROTARY change")
-    lcd.drawText(2, 44, "PAGE> save")
+    lcd.drawText(2, 2, "Select positions            ", INVERS)
+    lcd.drawText(2, 16, "Positions: " .. positions[positionIndex], MIDSIZE)
+    lcd.drawText(2, 30, "ROTARY change", SMLSIZE)
+    lcd.drawText(2, 40, "PAGE> save", SMLSIZE)
   elseif page == 3 then
     if isRotNext(event) then
       if posField == "band" then
@@ -405,7 +401,7 @@ local function run(event, touchState)
     end
 
     lcd.clear()
-    lcd.drawText(2, 2, "Pos " .. posIndex .. "/" .. positionsCount)
+    lcd.drawText(2, 2, "Pos " .. posIndex .. "/" .. positionsCount .. "                            ", INVERS)
     local bandLabel = "Band: " .. bands[bandIndex]
     local channelLabel = "Channel: " .. channels[channelIndex]
     if posField == "band" then
@@ -413,12 +409,13 @@ local function run(event, touchState)
     else
       channelLabel = ">" .. channelLabel
     end
-    lcd.drawText(2, 16, bandLabel)
-    lcd.drawText(2, 30, channelLabel)
-    lcd.drawText(2, 44, "ROTARY change, PAGE> next")
+    lcd.drawText(2, 16, bandLabel, MIDSIZE)
+    lcd.drawText(2, 30, channelLabel, MIDSIZE)
+    lcd.drawText(2, 44, "ROTARY change", SMLSIZE)
+    lcd.drawText(2, 54, "PAGE> next", SMLSIZE)
   else
     lcd.clear()
-    lcd.drawText(2, 2, "Setup saved")
+    lcd.drawText(2, 2, "Setup saved", DBLSIZE)
   end
 
   return 0

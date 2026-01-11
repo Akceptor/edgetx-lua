@@ -72,15 +72,11 @@ end
 local function isPageNext(event)
   return event == EVT_PAGEDN_FIRST
           or event == EVT_PAGEDN_LONG
-          or event == EVT_VIRTUAL_NEXT
-          or event == EVT_VIRTUAL_NEXT_PAGE
 end
 
 local function isPagePrev(event)
   return event == EVT_PAGEUP_FIRST
           or event == EVT_PAGEUP_LONG
-          or event == EVT_VIRTUAL_PREV
-          or event == EVT_VIRTUAL_PREV_PAGE
 end
 
 local function isRotNext(event)
