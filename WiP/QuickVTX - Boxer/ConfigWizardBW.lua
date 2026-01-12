@@ -11,7 +11,7 @@ local switchIndex = 1
 local positions = { 2, 3, 4, 5, 6 }
 local positionIndex = 1
 local positionsCount = 2
-local bands = { "A", "B", "E", "F", "R", "L", "X" }
+local bands = { "A", "B", "E", "F", "R", "L", "X", "Scan", "None" }
 local channels = { 1, 2, 3, 4, 5, 6, 7, 8 }
 local bandIndex = 1
 local channelIndex = 1
@@ -261,16 +261,24 @@ local function loadSelectionForPosition(index)
         break
       end
     end
-    for i = 1, #channels do
-      if channels[i] == sel.channel then
-        channelIndex = i
-        break
+    if sel.band ~= "Scan" and sel.band ~= "None" then
+      for i = 1, #channels do
+        if channels[i] == sel.channel then
+          channelIndex = i
+          break
+        end
       end
+    else
+      channelIndex = 1
     end
   else
     bandIndex = 1
     channelIndex = 1
   end
+end
+
+local function bandNeedsChannel(band)
+  return band ~= "Scan" and band ~= "None"
 end
 
 local function run(event, touchState)
@@ -370,21 +378,26 @@ local function run(event, touchState)
       if posField == "band" then
         bandIndex = (bandIndex % #bands) + 1
       else
-        channelIndex = (channelIndex % #channels) + 1
+        if bandNeedsChannel(bands[bandIndex]) then
+          channelIndex = (channelIndex % #channels) + 1
+        end
       end
     elseif isRotPrev(event) then
       if posField == "band" then
         bandIndex = ((bandIndex - 2) % #bands) + 1
       else
-        channelIndex = ((channelIndex - 2) % #channels) + 1
+        if bandNeedsChannel(bands[bandIndex]) then
+          channelIndex = ((channelIndex - 2) % #channels) + 1
+        end
       end
     elseif isPageNext(event) then
-      if posField == "band" then
+      if posField == "band" and bandNeedsChannel(bands[bandIndex]) then
         posField = "channel"
       else
+        local channelValue = bandNeedsChannel(bands[bandIndex]) and channels[channelIndex] or ""
         posSelections[posIndex] = {
           band = bands[bandIndex],
-          channel = channels[channelIndex],
+          channel = channelValue,
         }
         if posIndex < positionsCount then
           posIndex = posIndex + 1
@@ -403,10 +416,15 @@ local function run(event, touchState)
     lcd.clear()
     lcd.drawText(2, 2, "Pos " .. posIndex .. "/" .. positionsCount .. "                            ", INVERS)
     local bandLabel = "Band: " .. bands[bandIndex]
-    local channelLabel = "Channel: " .. channels[channelIndex]
+    local channelLabel
+    if bandNeedsChannel(bands[bandIndex]) then
+      channelLabel = "Channel: " .. channels[channelIndex]
+    else
+      channelLabel = "Channel: --"
+    end
     if posField == "band" then
       bandLabel = ">" .. bandLabel
-    else
+    elseif bandNeedsChannel(bands[bandIndex]) then
       channelLabel = ">" .. channelLabel
     end
     lcd.drawText(2, 16, bandLabel, MIDSIZE)

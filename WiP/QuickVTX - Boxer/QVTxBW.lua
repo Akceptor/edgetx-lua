@@ -5,6 +5,7 @@
 local deviceId = 0xEE
 local handsetId = 0xEF
 local CENTER_FLAG = CENTER or 0
+local RIGHT_FLAG = RIGHT or 0
 
 -- Command constants loaded from config
 local BAND_COMMAND
@@ -36,6 +37,7 @@ local channelValues = { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 }
 local SWITCH_SOURCE = nil -- radio input name, e.g. "sc", "sd", "s1"
 local SWITCH_POSITIONS = {}
 local SWITCH_TOLERANCE = 100 -- tolerance for matching switch positions, should be ok without changes
+local SCAN_STEP_TICKS = 500 -- ~5s per channel
 
 local frequencies = {
   A = {5865, 5845, 5825, 5805, 5785, 5765, 5745, 5725},
@@ -58,6 +60,11 @@ local switchDisplayMode = "name"
 local lastMessage
 local messageTimeout = 0
 local lastSwitchIndex
+local scanActive = false
+local scanMode = nil
+local scanBandIndex = 1
+local scanChannelIndex = 1
+local scanNextTick = 0
 
 local function isPageNext(event)
   return event == EVT_PAGEDN_FIRST
@@ -306,6 +313,14 @@ local function parseSwitchOption(text)
   if not text then
     return nil
   end
+  local trimmed = string.match(text, "^%s*(.-)%s*$") or ""
+  local lowered = string.lower(trimmed)
+  if lowered == "scan" or lowered == "none" then
+    return {
+      name = (lowered == "scan") and "Scan" or "None",
+      mode = lowered,
+    }
+  end
   local prefix, channelText = string.match(text, "^%s*([A-Za-z])%s*(%d+)%s*$")
   local channelNum = tonumber(channelText)
   if not prefix or not channelNum then
@@ -403,6 +418,43 @@ local function loadSwitchOverrides()
   end
 end
 
+local function bandRowType(index)
+  local switchIndex = #bands + 1
+  if index <= #bands then
+    return "band", index
+  end
+  if index == switchIndex then
+    return "switch"
+  end
+end
+
+local function startScan(fromCurrent)
+  scanActive = true
+  scanMode = "scan"
+  if fromCurrent then
+    scanBandIndex = selectedBandIndex or 1
+    scanChannelIndex = selectedChannelIndex or 1
+  else
+    scanBandIndex = 1
+    scanChannelIndex = 1
+  end
+  scanNextTick = 0
+end
+
+local function stopScan(mode)
+  scanActive = false
+  if mode == "none" then
+    scanMode = "none"
+  else
+    scanMode = nil
+  end
+end
+
+local function setSwitchMode()
+  scanActive = false
+  scanMode = "switch"
+end
+
 local function queueStep(label, command, value)
   local due = getTime()
   if #commandQueue > 0 then
@@ -419,7 +471,7 @@ local function queueStep(label, command, value)
   }
 end
 
-local function queueVtxSequence(opt)
+local function queueVtxSequence(opt, suppressMessage)
   if not BAND_COMMAND or not CHANNEL_COMMAND or not APPLY_COMMAND then
     lastMessage = "Commands not configured"
     messageTimeout = getTime() + 50
@@ -430,8 +482,10 @@ local function queueVtxSequence(opt)
   queueStep(baseLabel .. " band", BAND_COMMAND, opt.bandValue)
   queueStep(baseLabel .. " channel", CHANNEL_COMMAND, opt.channelValue)
   queueStep("Apply", APPLY_COMMAND, APPLY_VALUE)
-  lastMessage = "Queued " .. baseLabel .. " sequence"
-  messageTimeout = getTime() + 50 -- ~0.5s
+  if not suppressMessage then
+    lastMessage = "Queued " .. baseLabel .. " sequence"
+    messageTimeout = getTime() + 50 -- ~0.5s
+  end
 end
 
 local function resolveSwitchPreset(value)
@@ -456,20 +510,32 @@ local function handleSwitchPresets()
   end
 
   local preset, idx = resolveSwitchPreset(raw)
-  if not preset or not preset.bandValue or not preset.channelValue then
+  if not preset then
     lastSwitchIndex = nil
     return
   end
 
   if idx ~= lastSwitchIndex then
     lastSwitchIndex = idx
+    if preset.mode == "scan" then
+      bandRowIndex = #bands + 1
+      startScan(true)
+      return
+    elseif preset.mode == "none" then
+      bandRowIndex = #bands + 2
+      stopScan("none")
+      return
+    elseif not preset.bandValue or not preset.channelValue then
+      lastSwitchIndex = nil
+      return
+    else
+      setSwitchMode()
+    end
     local bandIdx = bandIndexFromValue(preset.bandValue)
     local channelIdx = channelIndexFromValue(preset.channelValue)
     if bandIdx then
       selectedBandIndex = bandIdx
-      if bandRowIndex <= #bands then
-        bandRowIndex = bandIdx
-      end
+      bandRowIndex = bandIdx
     end
     if channelIdx then
       selectedChannelIndex = channelIdx
@@ -479,6 +545,36 @@ local function handleSwitchPresets()
       bandValue = preset.bandValue,
       channelValue = preset.channelValue,
     })
+  end
+end
+
+local function updateScan()
+  if not scanActive then
+    return
+  end
+  if #commandQueue > 0 then
+    return
+  end
+  local now = getTime()
+  if scanNextTick == 0 or now >= scanNextTick then
+    local band = bands[scanBandIndex]
+    local channelValue = channelValues[scanChannelIndex]
+    if band and channelValue then
+      queueVtxSequence({
+        name = string.format("Scan %s%d", band.prefix, scanChannelIndex),
+        bandValue = band.value,
+        channelValue = channelValue,
+      }, true)
+      scanNextTick = now + SCAN_STEP_TICKS
+      scanChannelIndex = scanChannelIndex + 1
+      if scanChannelIndex > #channelValues then
+        scanChannelIndex = 1
+        scanBandIndex = scanBandIndex + 1
+        if scanBandIndex > #bands then
+          scanBandIndex = 1
+        end
+      end
+    end
   end
 end
 
@@ -532,6 +628,9 @@ local function currentOption()
 end
 
 local function freqText()
+  if scanActive then
+    return "Apply: Auto"
+  end
   local opt = currentOption()
   if not opt then
     return "Apply: --"
@@ -593,7 +692,8 @@ local function drawScreen()
     channelItems[i] = tostring(i)
   end
 
-  drawRow(bandItems, bandRowIndex, uiTopOffset, #bandItems, focusRow == 1, #bandItems)
+  local switchIndex = #bandItems
+  drawRow(bandItems, bandRowIndex, uiTopOffset, #bandItems, focusRow == 1, switchIndex)
   drawRow(channelItems, selectedChannelIndex, uiTopOffset + 14, #channelItems, focusRow == 2)
   local applyAttr = INVERS + CENTER_FLAG
   local applyText = freqText()
@@ -604,6 +704,17 @@ local function drawScreen()
 
   if lastMessage and getTime() < messageTimeout then
     lcd.drawText(2, LCD_H - 12, lastMessage, 0)
+  end
+  if scanMode then
+    local modeText
+    if scanMode == "scan" then
+      modeText = "Scan"
+    elseif scanMode == "none" then
+      modeText = "None"
+    else
+      modeText = "Switch"
+    end
+    lcd.drawText(LCD_W - 2, LCD_H - 12, modeText, INVERS + RIGHT_FLAG)
   end
 end
 
@@ -726,6 +837,7 @@ local function run(event)
 
   processQueue()
   handleSwitchPresets()
+  updateScan()
 
   if event == nil then
     return 2
@@ -742,7 +854,8 @@ local function run(event)
       focusRow = 3
     end
   elseif event == EVT_VIRTUAL_ENTER then
-    if focusRow == 1 and bandRowIndex == (#bands + 1) then
+    local rowType = bandRowType(bandRowIndex)
+    if focusRow == 1 and rowType == "switch" then
       if switchDisplayMode == "name" then
         switchDisplayMode = "count"
       else
@@ -750,8 +863,17 @@ local function run(event)
       end
     elseif focusRow == 3 then
       local chosen = currentOption()
-      if chosen then
-        queueVtxSequence(chosen)
+      if scanActive then
+        if chosen then
+          scanBandIndex = selectedBandIndex
+          scanChannelIndex = selectedChannelIndex
+          scanNextTick = 0
+        end
+      else
+        stopScan()
+        if chosen then
+          queueVtxSequence(chosen)
+        end
       end
     end
   elseif event == EVT_VIRTUAL_EXIT then
@@ -762,13 +884,20 @@ local function run(event)
       if bandRowIndex > (#bands + 1) then
         bandRowIndex = 1
       end
-      if bandRowIndex <= #bands then
+      local rowType = bandRowType(bandRowIndex)
+      if rowType == "band" then
         selectedBandIndex = bandRowIndex
+        if not scanActive and scanMode then
+          stopScan()
+        end
       end
     elseif focusRow == 2 then
       selectedChannelIndex = selectedChannelIndex + 1
       if selectedChannelIndex > #channelValues then
         selectedChannelIndex = 1
+      end
+      if not scanActive and scanMode then
+        stopScan()
       end
     end
   elseif event == EVT_ROT_LEFT then
@@ -777,13 +906,20 @@ local function run(event)
       if bandRowIndex < 1 then
         bandRowIndex = #bands + 1
       end
-      if bandRowIndex <= #bands then
+      local rowType = bandRowType(bandRowIndex)
+      if rowType == "band" then
         selectedBandIndex = bandRowIndex
+        if not scanActive and scanMode then
+          stopScan()
+        end
       end
     elseif focusRow == 2 then
       selectedChannelIndex = selectedChannelIndex - 1
       if selectedChannelIndex < 1 then
         selectedChannelIndex = #channelValues
+      end
+      if not scanActive and scanMode then
+        stopScan()
       end
     end
   end

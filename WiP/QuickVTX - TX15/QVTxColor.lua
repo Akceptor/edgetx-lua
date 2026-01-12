@@ -30,6 +30,7 @@ local bands = {
   { prefix = "X", value = 0x07 },
 }
 local channelValues = { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 }
+local SCAN_STEP_TICKS = 500 -- ~5s per channel
 
 local frequencies = {
   A = {5865, 5845, 5825, 5805, 5785, 5765, 5745, 5725},
@@ -267,6 +268,14 @@ local function parseSwitchOption(text)
   if not text then
     return nil
   end
+  local trimmed = string.match(text, "^%s*(.-)%s*$") or ""
+  local lowered = string.lower(trimmed)
+  if lowered == "scan" or lowered == "none" then
+    return {
+      name = (lowered == "scan") and "Scan" or "None",
+      mode = lowered,
+    }
+  end
   local prefix, channelText = string.match(text, "^%s*([A-Za-z])%s*(%d+)%s*$")
   local channelNum = tonumber(channelText)
   if not prefix or not channelNum then
@@ -408,6 +417,12 @@ local messageTimeout = 0
 local lastSwitchIndex
 local selectedBandIndex = 1
 local selectedChannelIndex = DEFAULT_CHANNEL
+local scanActive = false
+local scanMode = nil
+local scanBandIndex = 1
+local scanChannelIndex = 1
+local scanNextTick = 0
+local stopScan
 local refreshButtons
 local layout = {
   margin = 10,
@@ -424,6 +439,7 @@ local ui = {
   channelButtons = {},
   messageLabel = nil,
   applyButton = nil,
+  scanTag = nil,
 }
 local ACTIVE_COLOR = COLOR_THEME_PRIMARY1 or lcd.RGB(0, 180, 255)
 local INACTIVE_COLOR = COLOR_THEME_SECONDARY1 or lcd.RGB(70, 70, 70)
@@ -448,7 +464,7 @@ local function queueStep(label, command, value)
   }
 end
 
-local function queueVtxSequence(opt)
+local function queueVtxSequence(opt, suppressMessage)
   if not BAND_COMMAND or not CHANNEL_COMMAND or not APPLY_COMMAND then
     lastMessage = "Commands not configured"
     messageTimeout = getTime() + 50
@@ -459,8 +475,10 @@ local function queueVtxSequence(opt)
   queueStep(baseLabel .. " band", BAND_COMMAND, opt.bandValue)
   queueStep(baseLabel .. " channel", CHANNEL_COMMAND, opt.channelValue)
   queueStep("Apply", APPLY_COMMAND, APPLY_VALUE)
-  lastMessage = "Queued " .. baseLabel .. " sequence"
-  messageTimeout = getTime() + 50 -- ~0.5s
+  if not suppressMessage then
+    lastMessage = "Queued " .. baseLabel .. " sequence"
+    messageTimeout = getTime() + 50 -- ~0.5s
+  end
 end
 
 local function bandIndexFromValue(val)
@@ -479,18 +497,57 @@ local function bandIndexFromPrefix(prefix)
   end
 end
 
-local function setSelection(bandIdx, channelIdx, shouldQueue)
+local function setSelection(bandIdx, channelIdx, shouldQueue, fromSwitch)
   if bandIdx then
     selectedBandIndex = math.max(1, math.min(#bands, bandIdx))
   end
   if channelIdx then
     selectedChannelIndex = math.max(1, math.min(8, channelIdx))
   end
+  if not fromSwitch and scanMode and not scanActive then
+    stopScan()
+  end
   local opt = menuRows[selectedBandIndex] and menuRows[selectedBandIndex][selectedChannelIndex]
   if opt then
     if shouldQueue then
       queueVtxSequence(opt)
     end
+  end
+  if refreshButtons then
+    refreshButtons()
+  end
+end
+
+local function setSwitchMode()
+  scanActive = false
+  scanMode = "switch"
+  if refreshButtons then
+    refreshButtons()
+  end
+end
+
+local function startScan(fromCurrent)
+  scanActive = true
+  scanMode = "scan"
+  if fromCurrent then
+    scanBandIndex = selectedBandIndex or 1
+    scanChannelIndex = selectedChannelIndex or 1
+  else
+    scanBandIndex = 1
+    scanChannelIndex = 1
+  end
+  scanNextTick = 0
+  if refreshButtons then
+    refreshButtons()
+  end
+end
+
+stopScan = function(mode)
+  scanActive = false
+  if mode == "none" then
+    scanMode = "none"
+  else
+    scanMode = nil
   end
   if refreshButtons then
     refreshButtons()
@@ -519,13 +576,25 @@ local function handleSwitchPresets()
   end
 
   local preset, idx = resolveSwitchPreset(raw)
-  if not preset or not preset.bandValue or not preset.channelValue then
+  if not preset then
     lastSwitchIndex = nil
     return
   end
 
   if idx ~= lastSwitchIndex then
     lastSwitchIndex = idx
+    if preset.mode == "scan" then
+      startScan(true)
+      return
+    elseif preset.mode == "none" then
+      stopScan("none")
+      return
+    elseif not preset.bandValue or not preset.channelValue then
+      lastSwitchIndex = nil
+      return
+    else
+      setSwitchMode()
+    end
     local opt = {
       name = preset.name or string.format("%s#%d", SWITCH_SOURCE:upper(), idx),
       bandValue = preset.bandValue,
@@ -533,9 +602,39 @@ local function handleSwitchPresets()
     }
     local bandIdx = bandIndexFromValue(preset.bandValue)
     if bandIdx then
-      setSelection(bandIdx, preset.channelValue, false)
+      setSelection(bandIdx, preset.channelValue, false, true)
     end
     queueVtxSequence(opt)
+  end
+end
+
+local function updateScan()
+  if not scanActive then
+    return
+  end
+  if #commandQueue > 0 then
+    return
+  end
+  local now = getTime()
+  if scanNextTick == 0 or now >= scanNextTick then
+    local band = bands[scanBandIndex]
+    local channelValue = channelValues[scanChannelIndex]
+    if band and channelValue then
+      queueVtxSequence({
+        name = string.format("Scan %s%d", band.prefix, scanChannelIndex),
+        bandValue = band.value,
+        channelValue = channelValue,
+      }, true)
+      scanNextTick = now + SCAN_STEP_TICKS
+      scanChannelIndex = scanChannelIndex + 1
+      if scanChannelIndex > #channelValues then
+        scanChannelIndex = 1
+        scanBandIndex = scanBandIndex + 1
+        if scanBandIndex > #bands then
+          scanBandIndex = 1
+        end
+      end
+    end
   end
 end
 
@@ -667,6 +766,26 @@ refreshButtons = function()
   if ui.switchButton then
     ui.switchButton:set({ text = switchButtonText() })
   end
+  if ui.scanTag then
+    if scanMode then
+      local modeText
+      if scanMode == "scan" then
+        modeText = "Scan"
+      elseif scanMode == "none" then
+        modeText = "None"
+      else
+        modeText = "Switch"
+      end
+      ui.scanTag:set({
+        text = modeText,
+        color = TEXT_COLOR,
+        textColor = INACTIVE_COLOR,
+        hidden = false,
+      })
+    else
+      ui.scanTag:set({ hidden = true })
+    end
+  end
 end
 
 local function buildUi()
@@ -762,11 +881,20 @@ local function buildUi()
     textColor = TEXT_COLOR,
     press = function()
       local opt = currentOption()
-      if opt then
-        queueVtxSequence(opt)
+      if scanActive then
+        if opt then
+          scanBandIndex = selectedBandIndex
+          scanChannelIndex = selectedChannelIndex
+          scanNextTick = 0
+        end
       else
-        lastMessage = "No band/channel selected"
-        messageTimeout = getTime() + 50
+        stopScan()
+        if opt then
+          queueVtxSequence(opt)
+        else
+          lastMessage = "No band/channel selected"
+          messageTimeout = getTime() + 50
+        end
       end
     end
   })
@@ -780,6 +908,17 @@ local function buildUi()
     font = SMLSIZE,
     align = lvgl.ALIGN_CENTER,
     text = function() return messageText() end
+  })
+  ui.scanTag = ui.page:button({
+    x = LCD_W - 52,
+    y = messageY,
+    w = 50,
+    h = 12,
+    text = "",
+    font = SMLSIZE,
+    color = TEXT_COLOR,
+    textColor = INACTIVE_COLOR,
+    press = function() end
   })
 
   refreshButtons()
@@ -929,6 +1068,7 @@ local function run(event, touchState)
   end
   processQueue()
   handleSwitchPresets()
+  updateScan()
 
   if event == nil then
     return 2
@@ -940,8 +1080,17 @@ local function run(event, touchState)
     changeChannel(-1)
   elseif event == EVT_VIRTUAL_ENTER then
     local chosen = menuRows[selectedBandIndex] and menuRows[selectedBandIndex][selectedChannelIndex]
-    if chosen then
-      queueVtxSequence(chosen)
+    if scanActive then
+      if chosen then
+        scanBandIndex = selectedBandIndex
+        scanChannelIndex = selectedChannelIndex
+        scanNextTick = 0
+      end
+    else
+      stopScan()
+      if chosen then
+        queueVtxSequence(chosen)
+      end
     end
   elseif event == EVT_VIRTUAL_EXIT then
     return 1
