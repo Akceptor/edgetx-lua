@@ -4,5 +4,6 @@
 - [x] Allow Back configuration
 - [ ] Web config wizard
 - [ ] Support for TX15 background (Function or Widget)
-- [ ] Different key mappings
+- [ ] Different key mappings (EVT_VIRTUAL?)
+- [ ] Different bands support (exclude L and X bands in config)
 - [ ] Separate repository 
