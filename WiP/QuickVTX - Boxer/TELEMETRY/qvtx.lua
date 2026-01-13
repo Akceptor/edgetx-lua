@@ -35,7 +35,7 @@ local channelValues = { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 }
 local SWITCH_SOURCE = nil -- radio input name, e.g. "sc", "sd", "s1"
 local SWITCH_POSITIONS = {}
 local SWITCH_TOLERANCE = 100 -- tolerance for matching switch positions, should be ok without changes
-local SCAN_STEP_TICKS = 500 -- ~5s per channel
+local SCAN_STEP_TICKS_DEFAULT = 500 -- ~5s per channel
 
 local frequencies = {
   A = {5865, 5845, 5825, 5805, 5785, 5765, 5745, 5725},
@@ -60,6 +60,7 @@ local scanMode = nil
 local scanBandIndex = 1
 local scanChannelIndex = 1
 local scanNextTick = 0
+local scanStepTicks = SCAN_STEP_TICKS_DEFAULT
 
 local function parseHexByte(text)
   if not text then
@@ -686,10 +687,25 @@ local function parseSwitchOption(text)
   end
   local trimmed = string.match(text, "^%s*(.-)%s*$") or ""
   local lowered = string.lower(trimmed)
-  if lowered == "scan" or lowered == "none" then
+  local scanSecondsText = string.match(lowered, "^scan%s*(%d+)%s*s?%s*$")
+  if lowered == "scan" or scanSecondsText then
+    local scanSeconds = tonumber(scanSecondsText)
+    if scanSeconds then
+      if scanSeconds < 1 then
+        scanSeconds = 1
+      elseif scanSeconds > 10 then
+        scanSeconds = 10
+      end
+    end
     return {
-      name = (lowered == "scan") and "Scan" or "None",
-      mode = lowered,
+      name = "Scan",
+      mode = "scan",
+      scanSeconds = scanSeconds,
+    }
+  elseif lowered == "none" then
+    return {
+      name = "None",
+      mode = "none",
     }
   end
   local prefix, channelText = string.match(text, "^%s*([A-Za-z])%s*(%d+)%s*$")
@@ -822,9 +838,14 @@ local function queueVtxSequence(opt, suppressMessage)
   end
 end
 
-local function startScan(fromCurrent)
+local function startScan(fromCurrent, stepSeconds)
   scanActive = true
   scanMode = "scan"
+  if stepSeconds and stepSeconds > 0 then
+    scanStepTicks = stepSeconds * 100
+  else
+    scanStepTicks = SCAN_STEP_TICKS_DEFAULT
+  end
   if fromCurrent then
     scanBandIndex = selectedBandIndex or 1
     scanChannelIndex = selectedChannelIndex or 1
@@ -879,7 +900,7 @@ local function handleSwitchPresets()
   if idx ~= lastSwitchIndex then
     lastSwitchIndex = idx
     if preset.mode == "scan" then
-      startScan(true)
+      startScan(true, preset.scanSeconds)
       return
     elseif preset.mode == "none" then
       stopScan("none")
@@ -925,7 +946,7 @@ local function updateScan()
         bandValue = band.value,
         channelValue = channelValue,
       }, true)
-      scanNextTick = now + SCAN_STEP_TICKS
+      scanNextTick = now + scanStepTicks
       scanChannelIndex = scanChannelIndex + 1
       if scanChannelIndex > #channelValues then
         scanChannelIndex = 1

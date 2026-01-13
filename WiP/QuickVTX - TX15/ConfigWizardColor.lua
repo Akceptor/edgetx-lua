@@ -13,6 +13,7 @@ local positionIndex = 1
 local positionsCount = 2
 local bands = { "A", "B", "E", "F", "R", "L", "X", "Scan", "None" }
 local channels = { 1, 2, 3, 4, 5, 6, 7, 8 }
+local scanDurations = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 }
 local bandIndex = 1
 local channelIndex = 1
 local posIndex = 1
@@ -374,7 +375,14 @@ local function loadSelectionForPosition(index)
         break
       end
     end
-    if sel.band ~= "Scan" and sel.band ~= "None" then
+    if sel.band == "Scan" then
+      for i = 1, #scanDurations do
+        if scanDurations[i] == sel.channel then
+          channelIndex = i
+          break
+        end
+      end
+    elseif sel.band ~= "None" then
       for i = 1, #channels do
         if channels[i] == sel.channel then
           channelIndex = i
@@ -390,8 +398,33 @@ local function loadSelectionForPosition(index)
   end
 end
 
-local function bandNeedsChannel(band)
-  return band ~= "Scan" and band ~= "None"
+local function bandAllowsChannel(band)
+  return band ~= "None"
+end
+
+local function channelOptionsForBand(band)
+  if band == "Scan" then
+    return scanDurations
+  end
+  return channels
+end
+
+local function channelLabelForBand(band, index)
+  local options = channelOptionsForBand(band)
+  local value = options[index]
+  if band == "Scan" then
+    return tostring(value) .. "s"
+  end
+  return tostring(value)
+end
+
+local function clampChannelIndex(band)
+  local options = channelOptionsForBand(band)
+  if channelIndex < 1 then
+    channelIndex = 1
+  elseif channelIndex > #options then
+    channelIndex = #options
+  end
 end
 
 local function run(event, touchState)
@@ -538,24 +571,33 @@ local function run(event, touchState)
     if isRotNext(event) then
       if posField == "band" then
         bandIndex = (bandIndex % #bands) + 1
+        clampChannelIndex(bands[bandIndex])
       else
-        if bandNeedsChannel(bands[bandIndex]) then
-          channelIndex = (channelIndex % #channels) + 1
+        if bandAllowsChannel(bands[bandIndex]) then
+          local options = channelOptionsForBand(bands[bandIndex])
+          channelIndex = (channelIndex % #options) + 1
         end
       end
     elseif isRotPrev(event) then
       if posField == "band" then
         bandIndex = ((bandIndex - 2) % #bands) + 1
+        clampChannelIndex(bands[bandIndex])
       else
-        if bandNeedsChannel(bands[bandIndex]) then
-          channelIndex = ((channelIndex - 2) % #channels) + 1
+        if bandAllowsChannel(bands[bandIndex]) then
+          local options = channelOptionsForBand(bands[bandIndex])
+          channelIndex = ((channelIndex - 2) % #options) + 1
         end
       end
     elseif isPageNext(event) then
-      if posField == "band" and bandNeedsChannel(bands[bandIndex]) then
+      if posField == "band" and bandAllowsChannel(bands[bandIndex]) then
         posField = "channel"
       else
-        local channelValue = bandNeedsChannel(bands[bandIndex]) and channels[channelIndex] or ""
+        local channelValue
+        if bandAllowsChannel(bands[bandIndex]) then
+          channelValue = channelOptionsForBand(bands[bandIndex])[channelIndex]
+        else
+          channelValue = ""
+        end
         posSelections[posIndex] = {
           band = bands[bandIndex],
           channel = channelValue,
@@ -585,14 +627,14 @@ local function run(event, touchState)
     drawTextTheme(textX, lineY, "Pos " .. posIndex .. "/" .. positionsCount, MIDSIZE, textFlags)
     local bandLabel = "Band: " .. bands[bandIndex]
     local channelLabel
-    if bandNeedsChannel(bands[bandIndex]) then
-      channelLabel = "Channel: " .. channels[channelIndex]
+    if bandAllowsChannel(bands[bandIndex]) then
+      channelLabel = "Channel: " .. channelLabelForBand(bands[bandIndex], channelIndex)
     else
       channelLabel = "Channel: --"
     end
     if posField == "band" then
       bandLabel = ">" .. bandLabel
-    elseif bandNeedsChannel(bands[bandIndex]) then
+    elseif bandAllowsChannel(bands[bandIndex]) then
       channelLabel = ">" .. channelLabel
     end
     drawTextTheme(textX, lineY + 22, bandLabel, nil, textFlags)

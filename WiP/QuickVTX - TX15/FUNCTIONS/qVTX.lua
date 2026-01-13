@@ -22,6 +22,7 @@ local bands = {
   { prefix = "X", value = 0x07 },
 }
 local channelValues = { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 }
+local SCAN_STEP_TICKS_DEFAULT = 500 -- ~5s per channel
 
 -- Switch automation configuration (set SWITCH_SOURCE to nil to disable)
 local SWITCH_SOURCE = nil -- radio input name, e.g. "sc", "sd", "s1"
@@ -32,6 +33,11 @@ local commandQueue = {}
 local QUEUE_DELAY_TICKS = 5 -- short delay (~0.05s) between queued commands
 
 local lastSwitchIndex
+local scanActive = false
+local scanBandIndex = 1
+local scanChannelIndex = 1
+local scanNextTick = 0
+local scanStepTicks = SCAN_STEP_TICKS_DEFAULT
 local configMissing = false
 local configMissingDetail = nil
 local licenseError = nil
@@ -683,6 +689,28 @@ local function parseSwitchOption(text)
   if trimmed == "" then
     return nil
   end
+  local lowered = string.lower(trimmed)
+  local scanSecondsText = string.match(lowered, "^scan%s*(%d+)%s*s?%s*$")
+  if lowered == "scan" or scanSecondsText then
+    local scanSeconds = tonumber(scanSecondsText)
+    if scanSeconds then
+      if scanSeconds < 1 then
+        scanSeconds = 1
+      elseif scanSeconds > 10 then
+        scanSeconds = 10
+      end
+    end
+    return {
+      name = "Scan",
+      mode = "scan",
+      scanSeconds = scanSeconds,
+    }
+  elseif lowered == "none" then
+    return {
+      name = "None",
+      mode = "none",
+    }
+  end
   local prefix, channelText = string.match(trimmed, "^([A-Za-z])%s*(%d+)$")
   local channelNum = tonumber(channelText)
   if not prefix or not channelNum then
@@ -901,6 +929,56 @@ local function queueVtxSequence(opt)
   queueStep("Apply", APPLY_COMMAND, APPLY_VALUE)
 end
 
+local function startScan(stepSeconds)
+  scanActive = true
+  if stepSeconds and stepSeconds > 0 then
+    scanStepTicks = stepSeconds * 100
+  else
+    scanStepTicks = SCAN_STEP_TICKS_DEFAULT
+  end
+  scanBandIndex = 1
+  scanChannelIndex = 1
+  scanNextTick = 0
+end
+
+local function stopScan()
+  scanActive = false
+  scanNextTick = 0
+end
+
+local function updateScan()
+  if not scanActive then
+    return
+  end
+  if #commandQueue > 0 then
+    return
+  end
+  if not getTime then
+    return
+  end
+  local now = getTime()
+  if scanNextTick == 0 or now >= scanNextTick then
+    local band = bands[scanBandIndex]
+    local channelValue = channelValues[scanChannelIndex]
+    if band and channelValue then
+      queueVtxSequence({
+        name = string.format("Scan %s%d", band.prefix, scanChannelIndex),
+        bandValue = band.value,
+        channelValue = channelValue,
+      })
+      scanNextTick = now + scanStepTicks
+      scanChannelIndex = scanChannelIndex + 1
+      if scanChannelIndex > #channelValues then
+        scanChannelIndex = 1
+        scanBandIndex = scanBandIndex + 1
+        if scanBandIndex > #bands then
+          scanBandIndex = 1
+        end
+      end
+    end
+  end
+end
+
 local function resolveSwitchPreset(value)
   if type(value) ~= "number" then
     return
@@ -926,13 +1004,27 @@ local function handleSwitchPresets()
   end
 
   local preset, idx = resolveSwitchPreset(raw)
-  if not preset or not preset.bandValue or not preset.channelValue then
+  if not preset then
     lastSwitchIndex = nil
     return
+  end
+  if preset.mode ~= "scan" and preset.mode ~= "none" then
+    if not preset.bandValue or not preset.channelValue then
+      lastSwitchIndex = nil
+      return
+    end
   end
 
   if idx ~= lastSwitchIndex then
     lastSwitchIndex = idx
+    if preset.mode == "scan" then
+      startScan(preset.scanSeconds)
+      return
+    elseif preset.mode == "none" then
+      stopScan()
+      return
+    end
+    stopScan()
     queueVtxSequence({
       name = preset.name or string.format("%s#%d", SWITCH_SOURCE:upper(), idx),
       bandValue = preset.bandValue,
@@ -1036,6 +1128,7 @@ local function step()
     return
   end
 
+  updateScan()
   processQueue()
   handleSwitchPresets()
 end
