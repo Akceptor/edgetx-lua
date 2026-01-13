@@ -1,7 +1,7 @@
 ## TODO
 - [x] Scan frequency (1-10s)
 - [ ] Support scan direction?
-- [ ] Allow Back configuration
+- [x] Allow Back configuration
 - [ ] Web config wizard
 - [ ] Support for TX15 background (Function or Widget)
 - [ ] Different key mappings

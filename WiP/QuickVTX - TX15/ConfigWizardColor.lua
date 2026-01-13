@@ -13,12 +13,14 @@ local positionIndex = 1
 local positionsCount = 2
 local bands = { "A", "B", "E", "F", "R", "L", "X", "Scan", "None" }
 local channels = { 1, 2, 3, 4, 5, 6, 7, 8 }
-local scanDurations = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 }
+local scanDurations = { 2, 3, 4, 5, 6, 7, 8, 9, 10 }
 local bandIndex = 1
 local channelIndex = 1
 local posIndex = 1
 local posSelections = {}
 local posField = "band"
+local selectedSwitch = nil
+local configWritten = false
 local deviceIdHash = nil
 local baseConfigWritten = false
 local logoImage = nil
@@ -366,6 +368,24 @@ local function updateCfgPositionValues(values)
   return ok
 end
 
+local function writeWizardConfig()
+  local switchValue = selectedSwitch or switches[switchIndex]
+  local count = (switchValue == "--") and 0 or positionsCount
+  local selections = {}
+  if count > 0 then
+    for i = 1, count do
+      selections[i] = posSelections[i]
+    end
+  end
+  if not updateCfgSwitch(switchValue) then
+    return false
+  end
+  if not updateCfgPositions(count) then
+    return false
+  end
+  return updateCfgPositionValues(selections)
+end
+
 local function loadSelectionForPosition(index)
   local sel = posSelections[index]
   if sel then
@@ -508,21 +528,16 @@ local function run(event, touchState)
       switchIndex = (switchIndex % #switches) + 1
     elseif isRotPrev(event) then
       switchIndex = ((switchIndex - 2) % #switches) + 1
+    elseif isPagePrev(event) then
+      page = 0
     elseif isPageNext(event) then
-      local selectedSwitch = switches[switchIndex]
-      if updateCfgSwitch(selectedSwitch) then
-        if selectedSwitch == "--" then
-          positionsCount = 0
-          if updateCfgPositions(positionsCount) and updateCfgPositionValues({}) then
-            page = 4
-          else
-            errorMsg = "CFG write failed"
-          end
-        else
-          page = 2
-        end
+      selectedSwitch = switches[switchIndex]
+      if selectedSwitch == "--" then
+        positionsCount = 0
+        posSelections = {}
+        page = 4
       else
-        errorMsg = "CFG write failed"
+        page = 2
       end
     end
 
@@ -538,21 +553,20 @@ local function run(event, touchState)
     drawTextTheme(textX, lineY + 22, "Switch: " .. switches[switchIndex], nil, textFlags)
     drawTextTheme(textX, lineY + 40, "ROTARY change", nil, textFlags)
     drawTextTheme(textX, lineY + 58, "PAGE> save", nil, textFlags)
+    drawTextTheme(textX, lineY + 76, "PAGE< back", nil, textFlags)
   elseif page == 2 then
     if isRotNext(event) then
       positionIndex = (positionIndex % #positions) + 1
     elseif isRotPrev(event) then
       positionIndex = ((positionIndex - 2) % #positions) + 1
+    elseif isPagePrev(event) then
+      page = 1
     elseif isPageNext(event) then
       positionsCount = positions[positionIndex]
-      if updateCfgPositions(positionsCount) then
-        page = 3
-        posIndex = 1
-        posField = "band"
-        loadSelectionForPosition(posIndex)
-      else
-        errorMsg = "CFG write failed"
-      end
+      page = 3
+      posIndex = 1
+      posField = "band"
+      loadSelectionForPosition(posIndex)
     end
 
     local textFlags = beginPage()
@@ -567,6 +581,7 @@ local function run(event, touchState)
     drawTextTheme(textX, lineY + 22, "Positions: " .. positions[positionIndex], nil, textFlags)
     drawTextTheme(textX, lineY + 40, "ROTARY change", nil, textFlags)
     drawTextTheme(textX, lineY + 58, "PAGE> save", nil, textFlags)
+    drawTextTheme(textX, lineY + 76, "PAGE< back", nil, textFlags)
   elseif page == 3 then
     if isRotNext(event) then
       if posField == "band" then
@@ -588,6 +603,16 @@ local function run(event, touchState)
           channelIndex = ((channelIndex - 2) % #options) + 1
         end
       end
+    elseif isPagePrev(event) then
+      if posField == "channel" then
+        posField = "band"
+      elseif posIndex > 1 then
+        posIndex = posIndex - 1
+        posField = "channel"
+        loadSelectionForPosition(posIndex)
+      else
+        page = 2
+      end
     elseif isPageNext(event) then
       if posField == "band" and bandAllowsChannel(bands[bandIndex]) then
         posField = "channel"
@@ -607,11 +632,7 @@ local function run(event, touchState)
           posField = "band"
           loadSelectionForPosition(posIndex)
         else
-          if updateCfgPositionValues(posSelections) then
-            page = 4
-          else
-            errorMsg = "CFG write failed"
-          end
+          page = 4
         end
       end
     end
@@ -641,6 +662,36 @@ local function run(event, touchState)
     drawTextTheme(textX, lineY + 40, channelLabel, nil, textFlags)
     drawTextTheme(textX, lineY + 58, "ROTARY change,", nil, textFlags)
     drawTextTheme(textX, lineY + 76, "PAGE> next", nil, textFlags)
+    drawTextTheme(textX, lineY + 94, "PAGE< back", nil, textFlags)
+  elseif page == 4 then
+    if isPagePrev(event) then
+      if selectedSwitch == "--" then
+        page = 1
+      else
+        page = 3
+      end
+    elseif isPageNext(event) then
+      if not configWritten then
+        configWritten = writeWizardConfig()
+        if not configWritten then
+          errorMsg = "CFG write failed"
+          return 0
+        end
+      end
+      page = 5
+    end
+
+    local textFlags = beginPage()
+    local textX, textY, logoH = drawCornerLogo()
+    if not textX then textX = 2 end
+    if not textY then textY = 2 end
+    local lineY = textY
+    if logoH and logoH > 0 then
+      lineY = textY + 2
+    end
+    drawTextTheme(textX, lineY, "Scave config                  ", MIDSIZE, textFlags)
+    drawTextTheme(textX, lineY + 58, "PAGE> save", nil, textFlags)
+    drawTextTheme(textX, lineY + 76, "PAGE< back", nil, textFlags)
   else
     local textFlags = beginPage()
     loadLogoImage()
