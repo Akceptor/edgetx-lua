@@ -271,9 +271,9 @@ local function parseSwitchOption(text)
   end
   local trimmed = string.match(text, "^%s*(.-)%s*$") or ""
   local lowered = string.lower(trimmed)
-  local scanSecondsText = string.match(lowered, "^scan%s*(%d+)%s*s?%s*$")
-  if lowered == "scan" or scanSecondsText then
-    local scanSeconds = tonumber(scanSecondsText)
+  if string.match(lowered, "^scan") then
+    local scanSeconds = tonumber(string.match(lowered, "(%d+)"))
+    local scanDirection = (string.find(lowered, "<") ~= nil) and -1 or 1
     if scanSeconds then
       if scanSeconds < 1 then
         scanSeconds = 1
@@ -284,6 +284,7 @@ local function parseSwitchOption(text)
     return {
       name = "Scan",
       mode = "scan",
+      scanDirection = scanDirection,
       scanSeconds = scanSeconds,
     }
   elseif lowered == "none" then
@@ -432,18 +433,21 @@ local function isBandSkipped(prefix)
   return skipBands[string.upper(prefix or "")] == true
 end
 
-local function alignScanToAllowedBand()
+local function alignScanToAllowedBand(direction)
   if #bands == 0 then
     return false
   end
   local guard = 0
   local band = bands[scanBandIndex]
+  local channelReset = (direction == -1) and #channelValues or 1
   while band and isBandSkipped(band.prefix) and guard < #bands do
-    scanBandIndex = scanBandIndex + 1
+    scanBandIndex = scanBandIndex + (direction or 1)
     if scanBandIndex > #bands then
       scanBandIndex = 1
+    elseif scanBandIndex < 1 then
+      scanBandIndex = #bands
     end
-    scanChannelIndex = 1
+    scanChannelIndex = channelReset
     band = bands[scanBandIndex]
     guard = guard + 1
   end
@@ -499,6 +503,7 @@ local scanBandIndex = 1
 local scanChannelIndex = 1
 local scanNextTick = 0
 local scanStepTicks = SCAN_STEP_TICKS_DEFAULT
+local scanDirection = 1
 local stopScan
 local refreshButtons
 local layout = {
@@ -603,9 +608,10 @@ local function setSwitchMode()
   end
 end
 
-local function startScan(fromCurrent, stepSeconds)
+local function startScan(fromCurrent, stepSeconds, direction)
   scanActive = true
   scanMode = "scan"
+  scanDirection = direction or 1
   if stepSeconds and stepSeconds > 0 then
     scanStepTicks = stepSeconds * 100
   else
@@ -666,7 +672,7 @@ local function handleSwitchPresets()
   if idx ~= lastSwitchIndex then
     lastSwitchIndex = idx
     if preset.mode == "scan" then
-      startScan(true, preset.scanSeconds)
+      startScan(true, preset.scanSeconds, preset.scanDirection)
       return
     elseif preset.mode == "none" then
       stopScan("none")
@@ -699,7 +705,7 @@ local function updateScan()
   end
   local now = getTime()
   if scanNextTick == 0 or now >= scanNextTick then
-    if not alignScanToAllowedBand() then
+    if not alignScanToAllowedBand(scanDirection) then
       scanActive = false
       lastMessage = "Scan: no bands"
       messageTimeout = getTime() + 100
@@ -717,14 +723,28 @@ local function updateScan()
         channelValue = channelValue,
       }, true)
       scanNextTick = now + scanStepTicks
-      scanChannelIndex = scanChannelIndex + 1
+      scanChannelIndex = scanChannelIndex + scanDirection
       if scanChannelIndex > #channelValues then
         scanChannelIndex = 1
         local guard = 0
         repeat
-          scanBandIndex = scanBandIndex + 1
+          scanBandIndex = scanBandIndex + scanDirection
           if scanBandIndex > #bands then
             scanBandIndex = 1
+          elseif scanBandIndex < 1 then
+            scanBandIndex = #bands
+          end
+          guard = guard + 1
+        until (guard >= #bands) or not isBandSkipped(bands[scanBandIndex].prefix)
+      elseif scanChannelIndex < 1 then
+        scanChannelIndex = #channelValues
+        local guard = 0
+        repeat
+          scanBandIndex = scanBandIndex + scanDirection
+          if scanBandIndex > #bands then
+            scanBandIndex = 1
+          elseif scanBandIndex < 1 then
+            scanBandIndex = #bands
           end
           guard = guard + 1
         until (guard >= #bands) or not isBandSkipped(bands[scanBandIndex].prefix)
@@ -865,7 +885,9 @@ refreshButtons = function()
     if scanMode then
       local modeText
       if scanMode == "scan" then
-        modeText = "Scan"
+        local seconds = math.max(1, math.floor((scanStepTicks or SCAN_STEP_TICKS_DEFAULT) / 100))
+        local dir = (scanDirection == -1) and "<" or ">"
+        modeText = string.format("Scan(%d)%s", seconds, dir)
       elseif scanMode == "none" then
         modeText = "None"
       else
@@ -1005,9 +1027,9 @@ local function buildUi()
     text = function() return messageText() end
   })
   ui.scanTag = ui.page:button({
-    x = LCD_W - 52,
+    x = LCD_W - 76,
     y = messageY,
-    w = 50,
+    w = 74,
     h = 12,
     text = "",
     font = SMLSIZE,
@@ -1080,7 +1102,7 @@ local function checkLicense()
     lines = readFileLines("/SCRIPTS/TOOLS/" .. licenseName)
   end
   if not lines then
-    return false, "License file missing"
+    return false, "License file missing: " .. deviceHash
   end
   local deviceId = nil
   local email = nil

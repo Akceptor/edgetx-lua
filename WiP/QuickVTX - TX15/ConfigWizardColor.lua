@@ -11,7 +11,7 @@ local switchIndex = 1
 local positions = { 2, 3, 4, 5, 6 }
 local positionIndex = 1
 local positionsCount = 2
-local bands = { "A", "B", "E", "F", "R", "L", "X", "Scan", "None" }
+local bands = { "A", "B", "E", "F", "R", "L", "X", "Scan>", "Scan<", "None" }
 local channels = { 1, 2, 3, 4, 5, 6, 7, 8 }
 local scanDurations = { 2, 3, 4, 5, 6, 7, 8, 9, 10 }
 local bandIndex = 1
@@ -395,7 +395,7 @@ local function loadSelectionForPosition(index)
         break
       end
     end
-    if sel.band == "Scan" then
+    if string.sub(sel.band or "", 1, 4) == "Scan" then
       for i = 1, #scanDurations do
         if scanDurations[i] == sel.channel then
           channelIndex = i
@@ -423,7 +423,7 @@ local function bandAllowsChannel(band)
 end
 
 local function channelOptionsForBand(band)
-  if band == "Scan" then
+  if string.sub(band or "", 1, 4) == "Scan" then
     return scanDurations
   end
   return channels
@@ -432,7 +432,7 @@ end
 local function channelLabelForBand(band, index)
   local options = channelOptionsForBand(band)
   local value = options[index]
-  if band == "Scan" then
+  if string.sub(band or "", 1, 4) == "Scan" then
     return tostring(value) .. "s"
   end
   return tostring(value)
