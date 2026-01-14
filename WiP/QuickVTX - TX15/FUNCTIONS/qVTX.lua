@@ -9,7 +9,6 @@ local APPLY_COMMAND
 local APPLY_VALUE = 0x01
 local cfgPathTemplate = "/SCRIPTS/TOOLS/_internal/vtxConfig_%s.cfg"
 local mainInitDone = false
-local LOG_PATH = "/LOGS/qVTX.log"
 
 -- Adjust values to match your VTX band mapping if needed
 local bands = {
@@ -33,49 +32,19 @@ local commandQueue = {}
 local QUEUE_DELAY_TICKS = 5 -- short delay (~0.05s) between queued commands
 
 local lastSwitchIndex
+local selectedBandIndex = 1
+local selectedChannelIndex = 1
 local scanActive = false
 local scanBandIndex = 1
 local scanChannelIndex = 1
 local scanNextTick = 0
 local scanStepTicks = SCAN_STEP_TICKS_DEFAULT
 local configMissing = false
-local configMissingDetail = nil
 local licenseError = nil
-local loggedMissingConfig = false
-local loggedLicenseError = false
-local loggedCrossfireMissing = false
-local loggedVtxAuto = false
 local vtxAutoActive = false
-local loggedConfigLoaded = false
-local loggedSwitchLoaded = false
-local loggedLicenseLoaded = false
-local loggedRuntimeError = false
-local lastHeartbeat = 0
-local heartbeatCount = 0
-local loggedRunStart = false
-local loggedBackgroundStart = false
-
-local function logLine(msg)
-  if not io or not io.open or not io.write or not io.close then
-    return
-  end
-  local ok, file = pcall(io.open, LOG_PATH, "a")
-  if not ok or not file then
-    return
-  end
-  local now = (getTime and getTime()) or 0
-  pcall(io.write, file, string.format("%d %s\n", now, tostring(msg)))
-  pcall(io.close, file)
-end
 
 local vtxAuto = (function()
-  ---- #########################################################################
-  ---- #                                                                       #
-  ---- # Copyright (C) OpenTX, adapted for ExpressLRS                          #
-  -----#                                                                       #
-  ---- # License GPLv2: http://www.gnu.org/licenses/gpl-2.0.html               #
-  ---- #                                                                       #
-  ---- #########################################################################
+
   local deviceId = 0xEE
   local handsetId = 0xEF
   local fieldTimeout = 0
@@ -576,7 +545,6 @@ end
 
 local function readFileLines(path)
   if not io or not io.open or not io.read or not io.close then
-    logLine("readFileLines: io missing")
     return nil
   end
   local file = io.open(path, "r")
@@ -649,27 +617,19 @@ local function cfgPathForHash(hash)
 end
 
 local function readConfigLines()
-  configMissingDetail = nil
   local internalCommandId = getCommandIdFromInternal()
   if not internalCommandId then
-    configMissingDetail = cfgPathTemplate
     return nil
   end
   local deviceHash = computeDeviceIdHash(internalCommandId)
   local hashPath = cfgPathForHash(deviceHash)
   if not hashPath then
-    configMissingDetail = cfgPathTemplate
     return nil
   end
   local hashLines = readFileLines(hashPath)
   if hashLines and #hashLines > 0 then
-    if not loggedConfigLoaded then
-      logLine("readConfigLines: loaded " .. hashPath .. " lines=" .. tostring(#hashLines))
-      loggedConfigLoaded = true
-    end
     return hashLines
   end
-  configMissingDetail = hashPath
   return nil
 end
 
@@ -677,6 +637,22 @@ local function bandValueFromPrefix(prefix)
   for _, band in ipairs(bands) do
     if band.prefix == prefix then
       return band.value
+    end
+  end
+end
+
+local function bandIndexFromValue(val)
+  for i, band in ipairs(bands) do
+    if band.value == val then
+      return i
+    end
+  end
+end
+
+local function channelIndexFromValue(val)
+  for i, channel in ipairs(channelValues) do
+    if channel == val then
+      return i
     end
   end
 end
@@ -711,6 +687,7 @@ local function parseSwitchOption(text)
       mode = "none",
     }
   end
+
   local prefix, channelText = string.match(trimmed, "^([A-Za-z])%s*(%d+)$")
   local channelNum = tonumber(channelText)
   if not prefix or not channelNum then
@@ -732,10 +709,6 @@ end
 local function loadCommandOverrides()
   local lines = readConfigLines()
   if not lines then
-    if not loggedMissingConfig then
-      logLine("loadCommandOverrides: config missing " .. tostring(configMissingDetail))
-      loggedMissingConfig = true
-    end
     return false
   end
 
@@ -753,12 +726,6 @@ local function loadCommandOverrides()
     if applyVal then
       APPLY_COMMAND = parseHexByte(applyVal)
     end
-  end
-  if not loggedConfigLoaded then
-    logLine("loadCommandOverrides: band=" .. tostring(BAND_COMMAND)
-      .. " channel=" .. tostring(CHANNEL_COMMAND)
-      .. " apply=" .. tostring(APPLY_COMMAND))
-    loggedConfigLoaded = true
   end
   return BAND_COMMAND and CHANNEL_COMMAND and APPLY_COMMAND
 end
@@ -809,11 +776,6 @@ local function loadSwitchOverrides()
   if #overrides > 0 then
     SWITCH_POSITIONS = overrides
   end
-  if not loggedSwitchLoaded then
-    logLine("loadSwitchOverrides: source=" .. tostring(SWITCH_SOURCE)
-      .. " positions=" .. tostring(#SWITCH_POSITIONS))
-    loggedSwitchLoaded = true
-  end
 end
 
 local function checkLicense()
@@ -821,24 +783,13 @@ local function checkLicense()
     APPLY_COMMAND = getCommandIdFromInternal()
   end
   if not APPLY_COMMAND then
-    if not loggedLicenseError then
-      logLine("checkLicense: missing APPLY_COMMAND")
-      loggedLicenseError = true
-    end
     return false, "Command missing in vtxConfig"
   end
   local deviceHash = computeDeviceIdHash(APPLY_COMMAND)
   local licenseName = "/SCRIPTS/TOOLS/_internal/license_" .. deviceHash .. ".txt"
   local lines = readFileLines(licenseName)
   if not lines then
-    if not loggedLicenseError then
-      logLine("checkLicense: license file missing " .. licenseName)
-      loggedLicenseError = true
-    end
     return false, "License file missing"
-  end
-  if not loggedLicenseLoaded then
-    logLine("checkLicense: license file loaded " .. licenseName)
   end
   local deviceIdValue = nil
   local email = nil
@@ -849,60 +800,18 @@ local function checkLicense()
     licenseVal = licenseVal or stripPrefix(lines[i], "LICENSE")
   end
   if not (deviceIdValue and email and licenseVal) then
-    if not loggedLicenseError then
-      logLine("checkLicense: license data missing")
-      loggedLicenseError = true
-    end
     return false, "License data missing"
-  end
-  if not loggedLicenseLoaded then
-    logLine("checkLicense: deviceId=" .. tostring(deviceIdValue)
-      .. " email=" .. tostring(email)
-      .. " license=" .. tostring(licenseVal))
-    loggedLicenseLoaded = true
   end
   local expectedLicense = computeLicense(deviceIdValue, email)
   local deviceMatch = normalizeHex(deviceIdValue) == normalizeHex(deviceHash)
   if not deviceMatch then
-    if not loggedLicenseError then
-      logLine("checkLicense: device id mismatch")
-      loggedLicenseError = true
-    end
     return false, "Device ID mismatch"
   end
   local licenseMatch = normalizeHex(licenseVal) == normalizeHex(expectedLicense)
   if not licenseMatch then
-    if not loggedLicenseError then
-      logLine("checkLicense: license mismatch")
-      loggedLicenseError = true
-    end
     return false, "License mismatch"
   end
   return true
-end
-
-local function logRuntimeError(err)
-  if loggedRuntimeError then
-    return
-  end
-  local msg = "runtime error: " .. tostring(err)
-  if debug and debug.traceback then
-    msg = msg .. " " .. debug.traceback()
-  end
-  logLine(msg)
-  loggedRuntimeError = true
-end
-
-local function maybeHeartbeat()
-  if not getTime then
-    return
-  end
-  local now = getTime()
-  if now - lastHeartbeat >= 200 then
-    lastHeartbeat = now
-    heartbeatCount = heartbeatCount + 1
-    logLine("heartbeat " .. tostring(heartbeatCount))
-  end
 end
 
 local function queueStep(label, command, value)
@@ -924,59 +833,38 @@ end
 local function queueVtxSequence(opt)
   commandQueue = {}
   local baseLabel = opt.name or "Preset"
+  local bandIdx = bandIndexFromValue(opt.bandValue)
+  local channelIdx = channelIndexFromValue(opt.channelValue)
+  if bandIdx then
+    selectedBandIndex = bandIdx
+  end
+  if channelIdx then
+    selectedChannelIndex = channelIdx
+  end
   queueStep(baseLabel .. " band", BAND_COMMAND, opt.bandValue)
   queueStep(baseLabel .. " channel", CHANNEL_COMMAND, opt.channelValue)
   queueStep("Apply", APPLY_COMMAND, APPLY_VALUE)
 end
 
-local function startScan(stepSeconds)
+local function startScan(fromCurrent, stepSeconds)
   scanActive = true
   if stepSeconds and stepSeconds > 0 then
     scanStepTicks = stepSeconds * 100
   else
     scanStepTicks = SCAN_STEP_TICKS_DEFAULT
   end
-  scanBandIndex = 1
-  scanChannelIndex = 1
+  if fromCurrent then
+    scanBandIndex = selectedBandIndex or 1
+    scanChannelIndex = selectedChannelIndex or 1
+  else
+    scanBandIndex = 1
+    scanChannelIndex = 1
+  end
   scanNextTick = 0
 end
 
 local function stopScan()
   scanActive = false
-  scanNextTick = 0
-end
-
-local function updateScan()
-  if not scanActive then
-    return
-  end
-  if #commandQueue > 0 then
-    return
-  end
-  if not getTime then
-    return
-  end
-  local now = getTime()
-  if scanNextTick == 0 or now >= scanNextTick then
-    local band = bands[scanBandIndex]
-    local channelValue = channelValues[scanChannelIndex]
-    if band and channelValue then
-      queueVtxSequence({
-        name = string.format("Scan %s%d", band.prefix, scanChannelIndex),
-        bandValue = band.value,
-        channelValue = channelValue,
-      })
-      scanNextTick = now + scanStepTicks
-      scanChannelIndex = scanChannelIndex + 1
-      if scanChannelIndex > #channelValues then
-        scanChannelIndex = 1
-        scanBandIndex = scanBandIndex + 1
-        if scanBandIndex > #bands then
-          scanBandIndex = 1
-        end
-      end
-    end
-  end
 end
 
 local function resolveSwitchPreset(value)
@@ -1008,28 +896,61 @@ local function handleSwitchPresets()
     lastSwitchIndex = nil
     return
   end
-  if preset.mode ~= "scan" and preset.mode ~= "none" then
-    if not preset.bandValue or not preset.channelValue then
-      lastSwitchIndex = nil
-      return
-    end
+
+  if idx == lastSwitchIndex then
+    return
+  end
+  lastSwitchIndex = idx
+
+  if preset.mode == "scan" then
+    startScan(true, preset.scanSeconds)
+    return
+  elseif preset.mode == "none" then
+    stopScan()
+    return
+  elseif not preset.bandValue or not preset.channelValue then
+    lastSwitchIndex = nil
+    return
   end
 
-  if idx ~= lastSwitchIndex then
-    lastSwitchIndex = idx
-    if preset.mode == "scan" then
-      startScan(preset.scanSeconds)
-      return
-    elseif preset.mode == "none" then
-      stopScan()
-      return
+  stopScan()
+  queueVtxSequence({
+    name = preset.name or string.format("%s#%d", SWITCH_SOURCE:upper(), idx),
+    bandValue = preset.bandValue,
+    channelValue = preset.channelValue,
+  })
+end
+
+local function updateScan()
+  if not scanActive then
+    return
+  end
+  if not getTime then
+    return
+  end
+  if #commandQueue > 0 then
+    return
+  end
+  local now = getTime()
+  if scanNextTick == 0 or now >= scanNextTick then
+    local band = bands[scanBandIndex]
+    local channelValue = channelValues[scanChannelIndex]
+    if band and channelValue then
+      queueVtxSequence({
+        name = string.format("Scan %s%d", band.prefix, scanChannelIndex),
+        bandValue = band.value,
+        channelValue = channelValue,
+      })
+      scanNextTick = now + scanStepTicks
+      scanChannelIndex = scanChannelIndex + 1
+      if scanChannelIndex > #channelValues then
+        scanChannelIndex = 1
+        scanBandIndex = scanBandIndex + 1
+        if scanBandIndex > #bands then
+          scanBandIndex = 1
+        end
+      end
     end
-    stopScan()
-    queueVtxSequence({
-      name = preset.name or string.format("%s#%d", SWITCH_SOURCE:upper(), idx),
-      bandValue = preset.bandValue,
-      channelValue = preset.channelValue,
-    })
   end
 end
 
@@ -1059,9 +980,6 @@ local function processQueue()
   local payload = { deviceId, handsetId, nextCmd.command, nextCmd.value }
   if crossfireTelemetryPush then
     crossfireTelemetryPush(0x2D, payload)
-  elseif not loggedCrossfireMissing then
-    logLine("processQueue: crossfireTelemetryPush missing")
-    loggedCrossfireMissing = true
   end
   shiftQueue()
 
@@ -1071,50 +989,31 @@ local function processQueue()
 end
 
 local function init()
-  logLine("init start")
   configMissing = false
   licenseError = nil
   vtxAutoActive = false
-  loggedVtxAuto = false
-  loggedConfigLoaded = false
-  loggedSwitchLoaded = false
-  loggedLicenseLoaded = false
-  loggedRuntimeError = false
-  lastHeartbeat = 0
-  heartbeatCount = 0
-  loggedRunStart = false
-  loggedBackgroundStart = false
   local cmd = getCommandIdFromInternal()
-  logLine("init cmd=" .. tostring(cmd))
   if not cmd then
     vtxAutoActive = true
-    logLine("init vtxAutoActive")
     return
   end
 
   if not loadCommandOverrides() then
     configMissing = true
-    logLine("init configMissing")
     return
   end
   loadSwitchOverrides()
   local ok, err = checkLicense()
   if not ok then
     licenseError = err
-    logLine("init licenseError " .. tostring(err))
     return
   end
-  logLine("init ok")
   mainInitDone = true
 end
 
 local function step()
   if vtxAutoActive then
     local res = vtxAuto and vtxAuto.run and vtxAuto.run(0) or 0
-    if not loggedVtxAuto then
-      logLine("vtxAuto run result=" .. tostring(res))
-      loggedVtxAuto = true
-    end
     if res == 1 then
       vtxAutoActive = false
       if not mainInitDone then
@@ -1128,43 +1027,18 @@ local function step()
     return
   end
 
+  handleSwitchPresets()
   updateScan()
   processQueue()
-  handleSwitchPresets()
 end
 
 local function run(event)
-  if not loggedRunStart then
-    logLine("run start")
-    loggedRunStart = true
-  end
-  if xpcall then
-    xpcall(step, logRuntimeError)
-  else
-    local ok, err = pcall(step)
-    if not ok then
-      logRuntimeError(err)
-    end
-  end
-  maybeHeartbeat()
+  step()
   return 0
 end
 
 local function background()
-  if not loggedBackgroundStart then
-    logLine("background start")
-    loggedBackgroundStart = true
-  end
-  if xpcall then
-    xpcall(step, logRuntimeError)
-  else
-    local ok, err = pcall(step)
-    if not ok then
-      logRuntimeError(err)
-    end
-  end
-  maybeHeartbeat()
-  return 0
+  step()
 end
 
 return { init = init, run = run, background = background }
