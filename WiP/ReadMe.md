@@ -2,7 +2,7 @@
 - [x] Scan frequency (1-10s)
 - [x] Support scan direction?
 - [x] Allow Back configuration
-- [ ] Web config wizard
+- [x] Web config wizard https://akceptor.github.io/QVTx-Config/
 - [x] Support for TX15 background (Function or Widget)
 - [ ] Different key mappings (EVT_VIRTUAL?)
 - [x] Detect switch in Wizard
