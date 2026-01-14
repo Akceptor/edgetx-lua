@@ -39,6 +39,7 @@ local scanBandIndex = 1
 local scanChannelIndex = 1
 local scanNextTick = 0
 local scanStepTicks = SCAN_STEP_TICKS_DEFAULT
+local scanDirection = 1
 local skipBands = {}
 local configMissing = false
 local licenseError = nil
@@ -667,9 +668,9 @@ local function parseSwitchOption(text)
     return nil
   end
   local lowered = string.lower(trimmed)
-  local scanSecondsText = string.match(lowered, "^scan%s*(%d+)%s*s?%s*$")
-  if lowered == "scan" or scanSecondsText then
-    local scanSeconds = tonumber(scanSecondsText)
+  if string.match(lowered, "^scan") then
+    local scanSeconds = tonumber(string.match(lowered, "(%d+)"))
+    local scanDirection = (string.find(lowered, "<") ~= nil) and -1 or 1
     if scanSeconds then
       if scanSeconds < 1 then
         scanSeconds = 1
@@ -680,6 +681,7 @@ local function parseSwitchOption(text)
     return {
       name = "Scan",
       mode = "scan",
+      scanDirection = scanDirection,
       scanSeconds = scanSeconds,
     }
   elseif lowered == "none" then
@@ -803,18 +805,21 @@ local function isBandSkipped(prefix)
   return skipBands[string.upper(prefix or "")] == true
 end
 
-local function alignScanToAllowedBand()
+local function alignScanToAllowedBand(direction)
   if #bands == 0 then
     return false
   end
   local guard = 0
   local band = bands[scanBandIndex]
+  local channelReset = (direction == -1) and #channelValues or 1
   while band and isBandSkipped(band.prefix) and guard < #bands do
-    scanBandIndex = scanBandIndex + 1
+    scanBandIndex = scanBandIndex + (direction or 1)
     if scanBandIndex > #bands then
       scanBandIndex = 1
+    elseif scanBandIndex < 1 then
+      scanBandIndex = #bands
     end
-    scanChannelIndex = 1
+    scanChannelIndex = channelReset
     band = bands[scanBandIndex]
     guard = guard + 1
   end
@@ -889,8 +894,9 @@ local function queueVtxSequence(opt)
   queueStep("Apply", APPLY_COMMAND, APPLY_VALUE)
 end
 
-local function startScan(fromCurrent, stepSeconds)
+local function startScan(fromCurrent, stepSeconds, direction)
   scanActive = true
+  scanDirection = direction or 1
   if stepSeconds and stepSeconds > 0 then
     scanStepTicks = stepSeconds * 100
   else
@@ -946,7 +952,7 @@ local function handleSwitchPresets()
   lastSwitchIndex = idx
 
   if preset.mode == "scan" then
-    startScan(true, preset.scanSeconds)
+    startScan(true, preset.scanSeconds, preset.scanDirection)
     return
   elseif preset.mode == "none" then
     stopScan()
@@ -976,7 +982,7 @@ local function updateScan()
   end
   local now = getTime()
   if scanNextTick == 0 or now >= scanNextTick then
-    if not alignScanToAllowedBand() then
+    if not alignScanToAllowedBand(scanDirection) then
       scanActive = false
       return
     end
@@ -989,14 +995,28 @@ local function updateScan()
         channelValue = channelValue,
       })
       scanNextTick = now + scanStepTicks
-      scanChannelIndex = scanChannelIndex + 1
+      scanChannelIndex = scanChannelIndex + scanDirection
       if scanChannelIndex > #channelValues then
         scanChannelIndex = 1
         local guard = 0
         repeat
-          scanBandIndex = scanBandIndex + 1
+          scanBandIndex = scanBandIndex + scanDirection
           if scanBandIndex > #bands then
             scanBandIndex = 1
+          elseif scanBandIndex < 1 then
+            scanBandIndex = #bands
+          end
+          guard = guard + 1
+        until (guard >= #bands) or not isBandSkipped(bands[scanBandIndex].prefix)
+      elseif scanChannelIndex < 1 then
+        scanChannelIndex = #channelValues
+        local guard = 0
+        repeat
+          scanBandIndex = scanBandIndex + scanDirection
+          if scanBandIndex > #bands then
+            scanBandIndex = 1
+          elseif scanBandIndex < 1 then
+            scanBandIndex = #bands
           end
           guard = guard + 1
         until (guard >= #bands) or not isBandSkipped(bands[scanBandIndex].prefix)

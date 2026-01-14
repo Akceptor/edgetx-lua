@@ -6,7 +6,7 @@ local child = nil
 local done = false
 local errorMsg = nil
 local page = 0
-local switches = { "--", "SA", "SB", "SC", "SD", "SE", "SF" }
+local switches = { "--", "SA", "SB", "SC", "SD", "SE", "SF", "S1", "S2" }
 local switchIndex = 1
 local positions = { 2, 3, 4, 5, 6 }
 local positionIndex = 1
@@ -14,6 +14,8 @@ local positionsCount = 2
 local bands = { "A", "B", "E", "F", "R", "L", "X", "Scan>", "Scan<", "None" }
 local channels = { 1, 2, 3, 4, 5, 6, 7, 8 }
 local scanDurations = { 2, 3, 4, 5, 6, 7, 8, 9, 10 }
+local switchCandidates = { "SA", "SB", "SC", "SD", "SE", "SF", "S1", "S2" }
+local lastSwitchValues = {}
 local bandIndex = 1
 local channelIndex = 1
 local posIndex = 1
@@ -90,6 +92,24 @@ end
 
 local function isRotPrev(event)
   return event == EVT_ROT_LEFT
+end
+
+local function detectSwitchFlip()
+  if not getValue then
+    return nil
+  end
+  for i = 1, #switchCandidates do
+    local name = string.lower(switchCandidates[i])
+    local val = getValue(name)
+    if val ~= nil then
+      local last = lastSwitchValues[name]
+      lastSwitchValues[name] = val
+      if last ~= nil and val ~= last then
+        return switchCandidates[i]
+      end
+    end
+  end
+  return nil
 end
 
 local function init()
@@ -377,6 +397,15 @@ local function run(event, touchState)
       end
     end
   elseif page == 1 then
+    local flipped = detectSwitchFlip()
+    if flipped then
+      for i = 1, #switches do
+        if switches[i] == flipped then
+          switchIndex = i
+          break
+        end
+      end
+    end
     if isRotNext(event) then
       switchIndex = (switchIndex % #switches) + 1
     elseif isRotPrev(event) then
@@ -398,8 +427,9 @@ local function run(event, touchState)
     lcd.drawText(2, 2, "Select switch                  ", INVERS)
     lcd.drawText(2, 16, "Switch: " .. switches[switchIndex], MIDSIZE)
     lcd.drawText(2, 30, "ROTARY change", SMLSIZE)
-    lcd.drawText(2, 40, "PAGE> save", SMLSIZE)
-    lcd.drawText(2, 50, "PAGE< back", SMLSIZE)
+    lcd.drawText(2, 40, "Flip switch to detect", SMLSIZE)
+    lcd.drawText(2, 50, "PAGE> save", SMLSIZE)
+    lcd.drawText(2, 60, "PAGE< back", SMLSIZE)
   elseif page == 2 then
     if isRotNext(event) then
       positionIndex = (positionIndex % #positions) + 1

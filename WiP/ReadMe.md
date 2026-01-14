@@ -5,6 +5,6 @@
 - [ ] Web config wizard
 - [x] Support for TX15 background (Function or Widget)
 - [ ] Different key mappings (EVT_VIRTUAL?)
-- [ ] Detect switch in Wizard
+- [x] Detect switch in Wizard
 - [x] Different bands support (exclude L and X bands in config)
 - [ ] Separate repository 
