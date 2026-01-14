@@ -16,6 +16,10 @@ local channels = { 1, 2, 3, 4, 5, 6, 7, 8 }
 local scanDurations = { 2, 3, 4, 5, 6, 7, 8, 9, 10 }
 local switchCandidates = { "SA", "SB", "SC", "SD", "SE", "SF", "S1", "S2" }
 local lastSwitchValues = {}
+local lastVirtualNextTick = -1
+local lastVirtualPrevTick = -1
+local lastPageEventTick = -100
+local PAGE_EVENT_COOLDOWN = 20
 local bandIndex = 1
 local channelIndex = 1
 local posIndex = 1
@@ -77,13 +81,37 @@ local function writeLicenseFile(hash)
 end
 
 local function isPageNext(event)
-  return event == EVT_PAGEDN_FIRST
-          or event == EVT_PAGEDN_LONG
+  if event == EVT_PAGEDN_FIRST or event == EVT_PAGEDN_LONG then
+    lastPageEventTick = getTime and getTime() or lastPageEventTick
+    return true
+  end
+  if event == EVT_VIRTUAL_NEXT_PAGE then
+    local now = getTime and getTime() or 0
+    if now == lastVirtualNextTick or (now - lastPageEventTick) <= PAGE_EVENT_COOLDOWN then
+      return false
+    end
+    lastVirtualNextTick = now
+    lastPageEventTick = now
+    return true
+  end
+  return false
 end
 
 local function isPagePrev(event)
-  return event == EVT_PAGEUP_FIRST
-          or event == EVT_PAGEUP_LONG
+  if event == EVT_PAGEUP_FIRST or event == EVT_PAGEUP_LONG then
+    lastPageEventTick = getTime and getTime() or lastPageEventTick
+    return true
+  end
+  if event == EVT_VIRTUAL_PREV_PAGE then
+    local now = getTime and getTime() or 0
+    if now == lastVirtualPrevTick or (now - lastPageEventTick) <= PAGE_EVENT_COOLDOWN then
+      return false
+    end
+    lastVirtualPrevTick = now
+    lastPageEventTick = now
+    return true
+  end
+  return false
 end
 
 local function isRotNext(event)

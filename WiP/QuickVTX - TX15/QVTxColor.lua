@@ -32,6 +32,10 @@ local bands = {
 local channelValues = { 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 }
 local SCAN_STEP_TICKS_DEFAULT = 500 -- ~5s per channel
 local skipBands = {}
+local lastVirtualNextTick = -1
+local lastVirtualPrevTick = -1
+local lastPageEventTick = -100
+local PAGE_EVENT_COOLDOWN = 20
 
 local frequencies = {
   A = {5865, 5845, 5825, 5805, 5785, 5765, 5745, 5725},
@@ -44,13 +48,45 @@ local frequencies = {
 }
 
 local function isPageNext(event)
-  return event == EVT_PAGEDN_FIRST
-          or event == EVT_PAGEDN_LONG
+  if event == EVT_PAGEDN_FIRST or event == EVT_PAGEDN_LONG then
+    local now = (getTime and getTime()) or lastPageEventTick or 0
+    lastPageEventTick = now
+    return true
+  end
+  if event == EVT_VIRTUAL_NEXT_PAGE then
+    local now = (getTime and getTime()) or lastPageEventTick or 0
+    if type(lastPageEventTick) ~= "number" then
+      lastPageEventTick = now
+    end
+    if now == lastVirtualNextTick or (now - lastPageEventTick) <= PAGE_EVENT_COOLDOWN then
+      return false
+    end
+    lastVirtualNextTick = now
+    lastPageEventTick = now
+    return true
+  end
+  return false
 end
 
 local function isPagePrev(event)
-  return event == EVT_PAGEUP_FIRST
-          or event == EVT_PAGEUP_LONG
+  if event == EVT_PAGEUP_FIRST or event == EVT_PAGEUP_LONG then
+    local now = (getTime and getTime()) or lastPageEventTick or 0
+    lastPageEventTick = now
+    return true
+  end
+  if event == EVT_VIRTUAL_PREV_PAGE then
+    local now = (getTime and getTime()) or lastPageEventTick or 0
+    if type(lastPageEventTick) ~= "number" then
+      lastPageEventTick = now
+    end
+    if now == lastVirtualPrevTick or (now - lastPageEventTick) <= PAGE_EVENT_COOLDOWN then
+      return false
+    end
+    lastVirtualPrevTick = now
+    lastPageEventTick = now
+    return true
+  end
+  return false
 end
 
 local function parseHexByte(text)

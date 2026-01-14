@@ -67,16 +67,52 @@ local scanChannelIndex = 1
 local scanNextTick = 0
 local scanStepTicks = SCAN_STEP_TICKS_DEFAULT
 local scanDirection = 1
+local lastVirtualNextTick = -1
+local lastVirtualPrevTick = -1
+local lastPageEventTick = -100
+local PAGE_EVENT_COOLDOWN = 20
 local skipBands = {}
 
 local function isPageNext(event)
-  return event == EVT_PAGEDN_FIRST
-          or event == EVT_PAGEDN_LONG
+  if event == EVT_PAGEDN_FIRST or event == EVT_PAGEDN_LONG then
+    local now = (getTime and getTime()) or lastPageEventTick or 0
+    lastPageEventTick = now
+    return true
+  end
+  if event == EVT_VIRTUAL_NEXT_PAGE then
+    local now = (getTime and getTime()) or lastPageEventTick or 0
+    if type(lastPageEventTick) ~= "number" then
+      lastPageEventTick = now
+    end
+    if now == lastVirtualNextTick or (now - lastPageEventTick) <= PAGE_EVENT_COOLDOWN then
+      return false
+    end
+    lastVirtualNextTick = now
+    lastPageEventTick = now
+    return true
+  end
+  return false
 end
 
 local function isPagePrev(event)
-  return event == EVT_PAGEUP_FIRST
-          or event == EVT_PAGEUP_LONG
+  if event == EVT_PAGEUP_FIRST or event == EVT_PAGEUP_LONG then
+    local now = (getTime and getTime()) or lastPageEventTick or 0
+    lastPageEventTick = now
+    return true
+  end
+  if event == EVT_VIRTUAL_PREV_PAGE then
+    local now = (getTime and getTime()) or lastPageEventTick or 0
+    if type(lastPageEventTick) ~= "number" then
+      lastPageEventTick = now
+    end
+    if now == lastVirtualPrevTick or (now - lastPageEventTick) <= PAGE_EVENT_COOLDOWN then
+      return false
+    end
+    lastVirtualPrevTick = now
+    lastPageEventTick = now
+    return true
+  end
+  return false
 end
 
 local function parseHexByte(text)
