@@ -61,6 +61,7 @@ local scanBandIndex = 1
 local scanChannelIndex = 1
 local scanNextTick = 0
 local scanStepTicks = SCAN_STEP_TICKS_DEFAULT
+local skipBands = {}
 
 local function parseHexByte(text)
   if not text then
@@ -805,6 +806,48 @@ local function loadSwitchOverrides()
   end
 end
 
+local function loadSkipBands()
+  skipBands = {}
+  local lines = readConfigLines()
+  if not lines then
+    return
+  end
+  for _, line in ipairs(lines) do
+    local skipVal = stripPrefix(line, "Skip")
+    if skipVal then
+      local letters = string.match(skipVal, "^%s*([A-Za-z]+)")
+      for letter in string.gmatch(letters or "", "%a") do
+        local prefix = string.upper(letter)
+        if bandValueFromPrefix(prefix) then
+          skipBands[prefix] = true
+        end
+      end
+    end
+  end
+end
+
+local function isBandSkipped(prefix)
+  return skipBands[string.upper(prefix or "")] == true
+end
+
+local function alignScanToAllowedBand()
+  if #bands == 0 then
+    return false
+  end
+  local guard = 0
+  local band = bands[scanBandIndex]
+  while band and isBandSkipped(band.prefix) and guard < #bands do
+    scanBandIndex = scanBandIndex + 1
+    if scanBandIndex > #bands then
+      scanBandIndex = 1
+    end
+    scanChannelIndex = 1
+    band = bands[scanBandIndex]
+    guard = guard + 1
+  end
+  return band and not isBandSkipped(band.prefix)
+end
+
 local function queueStep(label, command, value)
   local due = getTime()
   if #commandQueue > 0 then
@@ -936,6 +979,12 @@ local function updateScan()
   end
   local now = getTime()
   if scanNextTick == 0 or now >= scanNextTick then
+    if not alignScanToAllowedBand() then
+      scanActive = false
+      lastMessage = "Scan: no bands"
+      messageTimeout = getTime() + 100
+      return
+    end
     local band = bands[scanBandIndex]
     local channelValue = channelValues[scanChannelIndex]
     if band and channelValue then
@@ -950,10 +999,14 @@ local function updateScan()
       scanChannelIndex = scanChannelIndex + 1
       if scanChannelIndex > #channelValues then
         scanChannelIndex = 1
-        scanBandIndex = scanBandIndex + 1
-        if scanBandIndex > #bands then
-          scanBandIndex = 1
-        end
+        local guard = 0
+        repeat
+          scanBandIndex = scanBandIndex + 1
+          if scanBandIndex > #bands then
+            scanBandIndex = 1
+          end
+          guard = guard + 1
+        until (guard >= #bands) or not isBandSkipped(bands[scanBandIndex].prefix)
       end
     end
   end
@@ -1142,6 +1195,7 @@ local function init_func()
     return
   end
   loadSwitchOverrides()
+  loadSkipBands()
   local ok, err = checkLicense()
   if not ok then
     licenseError = err
@@ -1178,9 +1232,9 @@ local function background()
     return 0
   end
 
-  processQueue()
   handleSwitchPresets()
   updateScan()
+  processQueue()
   return 0
 end
 
@@ -1213,9 +1267,9 @@ local function run_func(event, touchState)
     return 0
   end
 
-  processQueue()
   handleSwitchPresets()
   updateScan()
+  processQueue()
 
   if event == nil then
     return 2
