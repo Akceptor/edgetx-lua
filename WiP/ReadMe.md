@@ -7,4 +7,4 @@
 - [x] Different key mappings (EVT_VIRTUAL?)
 - [x] Detect switch in Wizard
 - [x] Different bands support (exclude L and X bands in config)
-- [ ] Separate repository 
+- [x] Separate repository https://github.com/Akceptor/Quick-VTx
