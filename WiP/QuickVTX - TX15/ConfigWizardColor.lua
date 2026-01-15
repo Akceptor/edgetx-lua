@@ -6,15 +6,15 @@ local child = nil
 local done = false
 local errorMsg = nil
 local page = 0
-local switches = { "--", "SA", "SB", "SC", "SD", "SE", "SF", "S1", "S2" }
+local switches = { "--", "SA", "SB", "SC", "SD", "SE", "SF", "S1", "S2", "S3" }
 local switchIndex = 1
-local positions = { 2, 3, 4, 5, 6 }
+local positions = { 2, 3, 4, 5, 6, 7, 8 }
 local positionIndex = 1
 local positionsCount = 2
 local bands = { "A", "B", "E", "F", "R", "L", "X", "Scan>", "Scan<", "None" }
 local channels = { 1, 2, 3, 4, 5, 6, 7, 8 }
 local scanDurations = { 2, 3, 4, 5, 6, 7, 8, 9, 10 }
-local switchCandidates = { "SA", "SB", "SC", "SD", "SE", "SF", "S1", "S2" }
+local switchCandidates = { "SA", "SB", "SC", "SD", "SE", "SF", "S1", "S2", "S3" }
 local lastSwitchValues = {}
 local lastVirtualNextTick = -1
 local lastVirtualPrevTick = -1
@@ -76,6 +76,25 @@ local function cfgPathForHash(hash)
     return nil
   end
   return string.format(cfgPathTemplate, hash)
+end
+
+local function writeLicenseFile(hash)
+  if not hash or hash == "" then
+    return false
+  end
+  local filename = "_internal/license_" .. hash .. ".txt"
+  local existing = io.open(filename, "r")
+  if existing then
+    io.close(existing)
+    return true
+  end
+  local file = io.open(filename, "w")
+  if not file then
+    return false
+  end
+  io.write(file, "DEVICEID = ", hash, "\n")
+  io.close(file)
+  return true
 end
 
 local function isPageNext(event)
@@ -517,13 +536,6 @@ local function run(event, touchState)
     end
 
     if done then
-      if not baseConfigWritten then
-        baseConfigWritten = writeBaseConfig()
-        if not baseConfigWritten then
-          errorMsg = "Config write failed"
-          return 0
-        end
-      end
       local textFlags = beginPage()
       loadLogoImage()
       local hash = getDeviceIdHash()
@@ -610,7 +622,7 @@ local function run(event, touchState)
     drawTextTheme(textX, lineY + 22, "Switch: " .. switches[switchIndex], nil, textFlags)
     drawTextTheme(textX, lineY + 40, "ROTARY change", nil, textFlags)
     drawTextTheme(textX, lineY + 58, "Flip switch to detect", nil, textFlags)
-    drawTextTheme(textX, lineY + 76, "PAGE> save", nil, textFlags)
+    drawTextTheme(textX, lineY + 76, "PAGE> next", nil, textFlags)
     drawTextTheme(textX, lineY + 94, "PAGE< back", nil, textFlags)
   elseif page == 2 then
     if isRotNext(event) then
@@ -638,7 +650,7 @@ local function run(event, touchState)
     drawTextTheme(textX, lineY, "Select positions", MIDSIZE, textFlags)
     drawTextTheme(textX, lineY + 22, "Positions: " .. positions[positionIndex], nil, textFlags)
     drawTextTheme(textX, lineY + 40, "ROTARY change", nil, textFlags)
-    drawTextTheme(textX, lineY + 58, "PAGE> save", nil, textFlags)
+    drawTextTheme(textX, lineY + 58, "PAGE> next", nil, textFlags)
     drawTextTheme(textX, lineY + 76, "PAGE< back", nil, textFlags)
   elseif page == 3 then
     if isRotNext(event) then
@@ -704,17 +716,19 @@ local function run(event, touchState)
       lineY = textY + 2
     end
     drawTextTheme(textX, lineY, "Pos " .. posIndex .. "/" .. positionsCount, MIDSIZE, textFlags)
-    local bandLabel = "Band: " .. bands[bandIndex]
+    local bandLabel = " Band: " .. bands[bandIndex]
     local channelLabel
     if bandAllowsChannel(bands[bandIndex]) then
-      channelLabel = "Channel: " .. channelLabelForBand(bands[bandIndex], channelIndex)
+      channelLabel = " Channel: " .. channelLabelForBand(bands[bandIndex], channelIndex)
     else
-      channelLabel = "Channel: --"
+      channelLabel = " Channel: --"
     end
     if posField == "band" then
       bandLabel = ">" .. bandLabel
+      channelLabel = " " .. channelLabel
     elseif bandAllowsChannel(bands[bandIndex]) then
       channelLabel = ">" .. channelLabel
+      bandLabel = " " .. bandLabel
     end
     drawTextTheme(textX, lineY + 22, bandLabel, nil, textFlags)
     drawTextTheme(textX, lineY + 40, channelLabel, nil, textFlags)
@@ -730,6 +744,17 @@ local function run(event, touchState)
       end
     elseif isPageNext(event) then
       if not configWritten then
+        if not baseConfigWritten then
+          baseConfigWritten = writeBaseConfig()
+          if not baseConfigWritten then
+            errorMsg = "Config write failed"
+            return 0
+          end
+        end
+        if not licenseWritten then
+          local hash = getDeviceIdHash()
+          licenseWritten = writeLicenseFile(hash)
+        end
         configWritten = writeWizardConfig()
         if not configWritten then
           errorMsg = "CFG write failed"
@@ -747,7 +772,7 @@ local function run(event, touchState)
     if logoH and logoH > 0 then
       lineY = textY + 2
     end
-    drawTextTheme(textX, lineY, "Scave config                  ", MIDSIZE, textFlags)
+    drawTextTheme(textX, lineY, "Save config                  ", MIDSIZE, textFlags)
     drawTextTheme(textX, lineY + 58, "PAGE> save", nil, textFlags)
     drawTextTheme(textX, lineY + 76, "PAGE< back", nil, textFlags)
   else

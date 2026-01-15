@@ -797,7 +797,7 @@ local function loadSwitchOverrides()
   for i = 1, count do
     local option = parseSwitchOption(positionsMap[i])
     if option then
-      local value = (count == 1) and 0 or (1000 - (i - 1) * step)
+      local value = (count == 1) and 0 or (-1000 + (i - 1) * step)
       option.value = roundValue(value)
       overrides[#overrides + 1] = option
     end

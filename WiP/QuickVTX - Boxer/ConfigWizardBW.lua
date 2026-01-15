@@ -6,15 +6,15 @@ local child = nil
 local done = false
 local errorMsg = nil
 local page = 0
-local switches = { "--", "SA", "SB", "SC", "SD", "SE", "SF", "S1", "S2" }
+local switches = { "--", "SA", "SB", "SC", "SD", "SE", "SF", "S1", "S2", "S3" }
 local switchIndex = 1
-local positions = { 2, 3, 4, 5, 6 }
+local positions = { 2, 3, 4, 5, 6, 7, 8 }
 local positionIndex = 1
 local positionsCount = 2
 local bands = { "A", "B", "E", "F", "R", "L", "X", "Scan>", "Scan<", "None" }
 local channels = { 1, 2, 3, 4, 5, 6, 7, 8 }
 local scanDurations = { 2, 3, 4, 5, 6, 7, 8, 9, 10 }
-local switchCandidates = { "SA", "SB", "SC", "SD", "SE", "SF", "S1", "S2" }
+local switchCandidates = { "SA", "SB", "SC", "SD", "SE", "SF", "S1", "S2", "S3" }
 local lastSwitchValues = {}
 local lastVirtualNextTick = -1
 local lastVirtualPrevTick = -1
@@ -404,17 +404,6 @@ local function run(event, touchState)
     end
 
     if done then
-      if not baseConfigWritten then
-        baseConfigWritten = writeBaseConfig()
-        if not baseConfigWritten then
-          errorMsg = "Config write failed"
-          return 0
-        end
-      end
-      if not licenseWritten then
-        local hash = getDeviceIdHash()
-        licenseWritten = writeLicenseFile(hash)
-      end
       lcd.clear()
       local hash = getDeviceIdHash()
       local idText = hash and ("Device ID: " .. hash) or "Device ID: N/A"
@@ -453,11 +442,11 @@ local function run(event, touchState)
 
     lcd.clear()
     lcd.drawText(2, 2, "Select switch                  ", INVERS)
-    lcd.drawText(2, 16, "Switch: " .. switches[switchIndex], MIDSIZE)
-    lcd.drawText(2, 30, "ROTARY change", SMLSIZE)
-    lcd.drawText(2, 40, "Flip switch to detect", SMLSIZE)
-    lcd.drawText(2, 50, "PAGE> save", SMLSIZE)
-    lcd.drawText(2, 60, "PAGE< back", SMLSIZE)
+    lcd.drawText(2, 12, "Switch: " .. switches[switchIndex], MIDSIZE)
+    lcd.drawText(2, 28, "ROTARY change", SMLSIZE)
+    lcd.drawText(2, 38, "Flip switch to detect", SMLSIZE)
+    lcd.drawText(2, 48, "PAGE> next", SMLSIZE)
+    lcd.drawText(2, 58, "PAGE< back", SMLSIZE)
   elseif page == 2 then
     if isRotNext(event) then
       positionIndex = (positionIndex % #positions) + 1
@@ -477,7 +466,7 @@ local function run(event, touchState)
     lcd.drawText(2, 2, "Select positions            ", INVERS)
     lcd.drawText(2, 16, "Positions: " .. positions[positionIndex], MIDSIZE)
     lcd.drawText(2, 30, "ROTARY change", SMLSIZE)
-    lcd.drawText(2, 40, "PAGE> save", SMLSIZE)
+    lcd.drawText(2, 40, "PAGE> next", SMLSIZE)
     lcd.drawText(2, 50, "PAGE< back", SMLSIZE)
   elseif page == 3 then
     if isRotNext(event) then
@@ -545,8 +534,10 @@ local function run(event, touchState)
     end
     if posField == "band" then
       bandLabel = ">" .. bandLabel
+      channelLabel = " " .. channelLabel
     elseif bandAllowsChannel(bands[bandIndex]) then
       channelLabel = ">" .. channelLabel
+      bandLabel = " " .. bandLabel
     end
     lcd.drawText(2, 16, bandLabel, MIDSIZE)
     lcd.drawText(2, 30, channelLabel, MIDSIZE)
@@ -562,6 +553,17 @@ local function run(event, touchState)
       end
     elseif isPageNext(event) then
       if not configWritten then
+        if not baseConfigWritten then
+          baseConfigWritten = writeBaseConfig()
+          if not baseConfigWritten then
+            errorMsg = "Config write failed"
+            return 0
+          end
+        end
+        if not licenseWritten then
+          local hash = getDeviceIdHash()
+          licenseWritten = writeLicenseFile(hash)
+        end
         configWritten = writeWizardConfig()
         if not configWritten then
           errorMsg = "CFG write failed"
@@ -572,7 +574,7 @@ local function run(event, touchState)
     end
 
     lcd.clear()
-    lcd.drawText(2, 2, "Scave config                  ", INVERS)
+    lcd.drawText(2, 2, "Save config                  ", INVERS)
     lcd.drawText(2, 40, "PAGE> save", SMLSIZE)
     lcd.drawText(2, 50, "PAGE< back", SMLSIZE)
   else
