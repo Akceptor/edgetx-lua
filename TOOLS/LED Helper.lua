@@ -194,8 +194,7 @@ local function buildUi()
   ui.page = lvgl.page({
     title = "LED Helper",
     subtitle = "Tap LED to toggle, tap color to choose",
-    back = close,
-    scrollable = false
+    back = close
   })
 
   local cols = 5

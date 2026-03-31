@@ -83,8 +83,7 @@ local function init()
   local pg = lvgl.page({
     title = "Calculator",
     subtitle = "LVGL",
-    back = close,
-    scrollable = false
+    back = close
   })
 
   displayLabel = pg:label({
