@@ -20,14 +20,14 @@ local MAP_W, MAP_H = 16, 12
 local MAP = {
   "################",
   "#..............#",   
-  "#..............#",
-  "#.#...........##",
+  "#.......E......#",
+  "#.#....##.....##",
   "#..............#",
   "#.......P....###",
   "#..............#",
   "#..............#",
   "#........####..#",
-  "#........#..#..#",
+  "#...E....#..#..#",
   "#........#..#..#",
   "################",
 }
@@ -74,15 +74,15 @@ local firing    = false
 local flashT    = 0
 local sfPrev    = false -- SF previous state for edge detection
 
--- ── Stick source IDs (resolved once in init) ──────────────────────────────────
-local srcRot, srcFwd, srcStr  -- source IDs or names for the 3 axes
+-- ── Input sources ─────────────────────────────────────────────────────────────
+local srcRot, srcFwd, srcStr  -- channel names for rotation / forward / strafe
 local dbgRot, dbgFwd, dbgStr = 0, 0, 0  -- last raw values for HUD debug
 local dbgRotCmd, dbgFwdCmd, dbgStrCmd = 0, 0, 0 -- mapped movement commands
 local dbgDX, dbgDY, dbgDirDX, dbgDirDY = 0, 0, 0, 0 -- applied per-frame deltas
 local dbgBlkX, dbgBlkY = 0, 0 -- collision block flags for current frame
 local dbgNx, dbgNy = 0, 0
 local dbgMoveX, dbgMoveY = 0, 0
-local initCount, frameCount = 0, 0
+local stickRot, stickFwd, stickStrafe = 0, 0, 0
 
 -- ── Z-buffer ──────────────────────────────────────────────────────────────────
 local zbuf = {}
@@ -223,7 +223,7 @@ local function renderHUD()
   fillRect(0, HUD_Y, W, HUD_H, C_HUD)
 
   lcd.setColor(CUSTOM_COLOR, C_WHITE)
-  lcd.drawText(10, HUD_Y + 2, "HPX", SMLSIZE + CUSTOM_COLOR)
+  lcd.drawText(10, HUD_Y + 2, "HP", SMLSIZE + CUSTOM_COLOR)
   fillRect(32, HUD_Y + 2, 120, 14, C_DKRED)
   local hw = math.floor(120 * health / 100)
   if hw > 0 then fillRect(32, HUD_Y + 5, hw, 14, C_RED) end
@@ -247,8 +247,8 @@ local function renderHUD()
     SMLSIZE + CUSTOM_COLOR)
   lcd.drawText(10, HUD_Y + 34,
     string.format(
-      "raw r/f/s=%d/%d/%d cmd=%.2f/%.2f/%.2f dpos=%.3f,%.3f i=%d f=%d",
-      dbgRot, dbgFwd, dbgStr, dbgRotCmd, dbgFwdCmd, dbgStrCmd, dbgDX, dbgDY, initCount, frameCount
+      "raw r/f/s=%d/%d/%d | cmd r/f/s=%d/%d/%d",
+      dbgRot, dbgFwd, dbgStr, stickRot, stickFwd, stickStrafe
     ),
     SMLSIZE + CUSTOM_COLOR)
   if TEST_FORCE_PX ~= nil then
@@ -263,32 +263,17 @@ local MOV  = 0.08
 local INV_ROT = 1
 local INV_FWD = 1
 local INV_STR = -1
-local TEST_ROT = nil  -- set to +/-ROT to bypass radio input
-local TEST_FWD = 0.08  -- set to +/-MOV to bypass radio input
-local TEST_STR = nil  -- set to +/-MOV to bypass radio input
 local TEST_FORCE_PX = nil -- set to +/- value to bypass movement math entirely
 
-local function axisStep(v, speed)
-  if v > DEAD then return speed end
-  if v < -DEAD then return -speed end
+local function axisStep(v)
+  if v > DEAD then return 1 end
+  if v < -DEAD then return -1 end
   return 0
 end
 
 local function rebuildViewFromAngle()
   pdx, pdy = math.cos(pa), math.sin(pa)
   ppx, ppy = -pdy * 0.66, pdx * 0.66
-end
-
--- Try a list of candidate names; return the first that getFieldInfo accepts,
--- falling back to the first name if none found (so getValue still gets called).
-local function resolveSource(candidates)
-  if getFieldInfo then
-    for _, name in ipairs(candidates) do
-      local fi = getFieldInfo(name)
-      if fi then return fi.id end
-    end
-  end
-  return candidates[1]
 end
 
 local function safeGet(src)
@@ -305,12 +290,9 @@ local function readHardware()
   dbgRot, dbgFwd, dbgStr = lsx, rsy, rsx  -- store for HUD
 
   -- Binary: any deflection past dead zone -> full speed (immune to calibration range)
-  local stickRot    = axisStep(lsx * INV_ROT, ROT)
-  local stickFwd    = axisStep(rsy * INV_FWD, MOV)
-  local stickStrafe = axisStep(rsx * INV_STR, MOV)
-  if TEST_ROT ~= nil then stickRot = TEST_ROT end
-  if TEST_FWD ~= nil then stickFwd = TEST_FWD end
-  if TEST_STR ~= nil then stickStrafe = TEST_STR end
+  stickRot    = axisStep(lsx * INV_ROT)
+  stickFwd    = axisStep(rsy * INV_FWD)
+  stickStrafe = axisStep(rsx * INV_STR)
   dbgRotCmd, dbgFwdCmd, dbgStrCmd = stickRot, stickFwd, stickStrafe
 
   local sfNow = sf > 512
@@ -330,14 +312,15 @@ local function updatePlayer(stickRot, stickFwd, stickStrafe)
 
   -- Rotation: left stick X
   if stickRot ~= 0 then
-    pa = pa + stickRot
+    pa = pa + stickRot * ROT
   end
   rebuildViewFromAngle()
 
   -- Forward / backward: right stick Y
   if stickFwd ~= 0 then
-    local dx = roundToInt(pdx * stickFwd * FP)
-    local dy = roundToInt(pdy * stickFwd * FP)
+    local f = stickFwd * MOV
+    local dx = roundToInt(pdx * f * FP)
+    local dy = roundToInt(pdy * f * FP)
     dbgNx = px + dx
     dbgNy = py + dy
 
@@ -362,8 +345,9 @@ local function updatePlayer(stickRot, stickFwd, stickStrafe)
 
   -- Strafe: right stick X  (right = positive)
   if stickStrafe ~= 0 then
-    local dx = roundToInt(pdy * stickStrafe * FP)
-    local dy = roundToInt(-pdx * stickStrafe * FP)
+    local s = stickStrafe * MOV
+    local dx = roundToInt(pdy * s * FP)
+    local dy = roundToInt(-pdx * s * FP)
     dbgNx = px + dx
     dbgNy = py + dy
 
@@ -449,11 +433,9 @@ end
 
 -- ── Init ──────────────────────────────────────────────────────────────────────
 local function init()
-  initCount = initCount + 1
-  -- Resolve stick sources: try multiple naming conventions EdgeTX uses
-  srcRot = resolveSource({"rud", "Rud", "ls-x", "lsx"})   -- left  stick X
-  srcFwd = resolveSource({"ele", "Ele", "rs-y", "rsy"})   -- right stick Y
-  srcStr = resolveSource({"ail", "Ail", "rs-x", "rsx"})   -- right stick X
+  srcRot = "ch1"
+  srcFwd = "ch2"
+  srcStr = "ch4"
 
   for y = 0, MAP_H - 1 do
     for x = 0, MAP_W - 1 do
@@ -472,10 +454,9 @@ end
 
 -- ── Run ───────────────────────────────────────────────────────────────────────
 local function run(event)
-  frameCount = frameCount + 1
   if not dead then
     firing = false                          -- reset; handlers below may set it
-    local stickRot, stickFwd, stickStrafe = readHardware()
+    readHardware()
     updatePlayer(stickRot, stickFwd, stickStrafe)
     if TEST_FORCE_PX ~= nil then
       px = px + roundToInt(TEST_FORCE_PX * FP)
