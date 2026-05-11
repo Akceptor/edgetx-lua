@@ -30,6 +30,7 @@ local apiVersionText
 local craftNameText = ""
 local pendingNameWrite
 local pendingSaveWrite = false
+local pendingRefreshWrite = false
 local activeButtonId
 local lastStatus
 local lastStatusTime = 0
@@ -86,20 +87,34 @@ local function setStatus(message)
     lastStatusTime = getTime()
 end
 
-local function sendNameUpdate(name)
+local function buildNamePayload(name)
     local payload = {}
     for i = 1, NAME_MAX_LENGTH do
         payload[i] = string.byte(name, i) or 0
     end
+    return payload
+end
+
+local function sendNameUpdate(name)
     pendingNameWrite = name
     pendingSaveWrite = false
+    pendingRefreshWrite = false
     setStatus("Updating name...")
-    protocol.mspWrite(MSP_SET_NAME, payload)
+    protocol.mspWrite(MSP_SET_NAME, buildNamePayload(name))
+    lastRequest = getTime()
+end
+
+local function sendNameRefresh(name)
+    if not name or name == "" then
+        return
+    end
+    pendingRefreshWrite = true
+    protocol.mspWrite(MSP_SET_NAME, buildNamePayload(name))
     lastRequest = getTime()
 end
 
 local function scheduleRequests()
-    if pendingNameWrite or pendingSaveWrite then
+    if pendingNameWrite or pendingSaveWrite or pendingRefreshWrite then
         return
     end
     local now = getTime()
@@ -137,25 +152,35 @@ local function processReplies()
             craftNameText = table.concat(name)
             requestStage = 3
         elseif cmd == MSP_SET_NAME then
-            local requestedName = pendingNameWrite
-            if err then
-                setStatus("Name update failed")
-                pendingSaveWrite = false
+            if pendingRefreshWrite then
+                -- Second SET_NAME after EEPROM_WRITE; sole purpose is to
+                -- force osdAnalyzeActiveElements() so the OSD repaints.
+                pendingRefreshWrite = false
                 activeButtonId = nil
-            else
-                if requestedName then
-                    craftNameText = requestedName
-                end
                 requestStage = 2
-                setStatus("Saving...")
-                protocol.mspWrite(MSP_EEPROM_WRITE, {})
-                pendingSaveWrite = true
-                lastRequest = getTime()
+            else
+                local requestedName = pendingNameWrite
+                if err then
+                    setStatus("Name update failed")
+                    pendingSaveWrite = false
+                    activeButtonId = nil
+                else
+                    if requestedName then
+                        craftNameText = requestedName
+                    end
+                    requestStage = 2
+                    setStatus("Saving...")
+                    protocol.mspWrite(MSP_EEPROM_WRITE, {})
+                    pendingSaveWrite = true
+                    lastRequest = getTime()
+                end
+                pendingNameWrite = nil
             end
-            pendingNameWrite = nil
         elseif cmd == MSP_EEPROM_WRITE then
             if err then
                 setStatus("Save failed")
+                pendingSaveWrite = false
+                activeButtonId = nil
             else
                 if craftNameText ~= "" then
                     setStatus("Name saved as " .. craftNameText)
@@ -163,9 +188,9 @@ local function processReplies()
                     setStatus("Name saved")
                 end
                 requestStage = 2
+                pendingSaveWrite = false
+                sendNameRefresh(craftNameText)
             end
-            pendingSaveWrite = false
-            activeButtonId = nil
         end
     end
 end
@@ -182,7 +207,7 @@ local function activateButton(btn, telemetryReady)
     if not btn then
         return
     end
-    if pendingNameWrite or pendingSaveWrite then
+    if pendingNameWrite or pendingSaveWrite or pendingRefreshWrite then
         setStatus("Update already in progress")
         return
     end
@@ -237,12 +262,18 @@ local function drawButton(btn, enabled, activeLabel)
 end
 
 local function drawButtons(telemetryReady)
-    local busy = pendingNameWrite or pendingSaveWrite
+    local busy = pendingNameWrite or pendingSaveWrite or pendingRefreshWrite
     local buttonsEnabled = telemetryReady and not busy
     for _, btn in ipairs(BUTTONS) do
         local label = btn.label
         if busy and activeButtonId == btn.id then
-            label = pendingSaveWrite and "Saving..." or "Updating..."
+            if pendingSaveWrite then
+                label = "Saving..."
+            elseif pendingRefreshWrite then
+                label = "Refreshing..."
+            else
+                label = "Updating..."
+            end
         end
         local enabled = buttonsEnabled
         if not enabled and busy and activeButtonId == btn.id then
@@ -266,6 +297,7 @@ local function run(event, touchState)
         lastRequest = 0
         pendingNameWrite = nil
         pendingSaveWrite = false
+        pendingRefreshWrite = false
         activeButtonId = nil
     else
         scheduleRequests()
