@@ -11,13 +11,13 @@ local ANIMATION_TEXT = "https://www.youtube.com/@Akceptor"
 local NAME_MAX_LENGTH = 16
 local DISPLAY_LENGTH = 10
 local SCROLL_INTERVAL = 100 -- 1 second assuming getTime() resolution is 1/100 s
+local WRITE_TIMEOUT = 200   -- 2 s — abandon a stuck write so we don't deadlock
 
 local textLength = #ANIMATION_TEXT
 local scrollIndex = 1
 local lastScrollTime = 0
 local pendingNameWrite = false
-local pendingRefreshWrite = false
-local activeSegment = ""
+local pendingSentAt = 0
 
 local function getScrollSegment()
     if textLength == 0 then
@@ -38,62 +38,43 @@ local function buildNamePayload(name)
     return payload
 end
 
-local function hasPendingWrite()
-    return pendingNameWrite or pendingRefreshWrite
-end
-
-local function clearPendingWrites()
-    pendingNameWrite = false
-    pendingRefreshWrite = false
-end
-
 local function resetRollingState()
     scrollIndex = 1
     lastScrollTime = 0
-    activeSegment = ""
-    clearPendingWrites()
+    pendingNameWrite = false
+    pendingSentAt = 0
 end
 
 local function sendNameUpdate(name)
     pendingNameWrite = true
-    pendingRefreshWrite = false
-    activeSegment = name
-    protocol.mspWrite(MSP_SET_NAME, buildNamePayload(name))
-end
-
-local function sendNameRefresh(name)
-    if not name or name == "" then
-        return
-    end
-    pendingRefreshWrite = true
+    pendingSentAt = getTime()
     protocol.mspWrite(MSP_SET_NAME, buildNamePayload(name))
 end
 
 local function processReplies()
     while true do
-        local cmd, _, err = mspPollReply()
+        local cmd, _, _ = mspPollReply()
         if not cmd then
             break
         end
         if cmd == MSP_SET_NAME then
-            if pendingRefreshWrite then
-                pendingRefreshWrite = false
-            elseif pendingNameWrite then
-                pendingNameWrite = false
-                if not err then
-                    -- Second SET_NAME forces osdAnalyzeActiveElements() so the OSD repaints.
-                    sendNameRefresh(activeSegment)
-                end
-            end
+            pendingNameWrite = false
         end
     end
 end
 
 local function tickAnimation()
-    if textLength == 0 or hasPendingWrite() then
+    if textLength == 0 then
         return
     end
     local now = getTime()
+    if pendingNameWrite then
+        if now - pendingSentAt >= WRITE_TIMEOUT then
+            pendingNameWrite = false -- give up on a missing reply and move on
+        else
+            return
+        end
+    end
     if lastScrollTime == 0 then
         scrollIndex = 1
         lastScrollTime = now
