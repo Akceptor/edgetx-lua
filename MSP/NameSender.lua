@@ -23,6 +23,10 @@ local BUTTON_HEIGHT = 44
 local BUTTON_Y = 80
 local BUTTON_SPACING = 12
 
+local ANIMATION_TEXT = "https://www.youtube.com/@Akceptor"
+local ANIMATION_DISPLAY_LENGTH = 10
+local ANIMATION_SCROLL_INTERVAL = 100 -- 1 second at getTime() resolution of 1/100s
+
 local lastRequest = 0
 local requestStage = 1
 
@@ -31,6 +35,10 @@ local craftNameText = ""
 local pendingNameWrite
 local pendingSaveWrite = false
 local pendingRefreshWrite = false
+local pendingAnimationWrite = false
+local animationActive = false
+local animationScrollIndex = 1
+local animationLastScrollTime = 0
 local activeButtonId
 local lastStatus
 local lastStatusTime = 0
@@ -54,6 +62,7 @@ local BUTTONS = {
     {
         id = "sendModelName",
         label = "Send Model Name",
+        action = "sendName",
         resolveName = function()
             return getRadioModelName()
         end,
@@ -62,6 +71,7 @@ local BUTTONS = {
     {
         id = "player1",
         label = "Player 1",
+        action = "sendName",
         resolveName = function()
             return "Player 1"
         end
@@ -69,9 +79,15 @@ local BUTTONS = {
     {
         id = "player2",
         label = "Player 2",
+        action = "sendName",
         resolveName = function()
             return "Player 2"
         end
+    },
+    {
+        id = "animation",
+        label = "Animation",
+        action = "toggleAnimation"
     }
 }
 
@@ -95,6 +111,52 @@ local function buildNamePayload(name)
     return payload
 end
 
+local function getAnimationSegment()
+    local textLen = #ANIMATION_TEXT
+    if textLen == 0 then
+        return ""
+    end
+    local segment = string.sub(ANIMATION_TEXT, animationScrollIndex, animationScrollIndex + ANIMATION_DISPLAY_LENGTH - 1)
+    if #segment < ANIMATION_DISPLAY_LENGTH then
+        segment = segment .. string.sub(ANIMATION_TEXT, 1, ANIMATION_DISPLAY_LENGTH - #segment)
+    end
+    return segment
+end
+
+local function sendAnimationFrame()
+    local segment = getAnimationSegment()
+    pendingAnimationWrite = true
+    craftNameText = segment
+    protocol.mspWrite(MSP_SET_NAME, buildNamePayload(segment))
+    lastRequest = getTime()
+end
+
+local function startAnimation()
+    animationActive = true
+    animationScrollIndex = 1
+    animationLastScrollTime = getTime()
+    setStatus("Animation running")
+    sendAnimationFrame()
+end
+
+local function stopAnimation()
+    animationActive = false
+    pendingAnimationWrite = false
+    setStatus("Animation stopped")
+end
+
+local function tickAnimation()
+    if not animationActive or pendingAnimationWrite then
+        return
+    end
+    local now = getTime()
+    if now - animationLastScrollTime >= ANIMATION_SCROLL_INTERVAL then
+        animationScrollIndex = (animationScrollIndex % #ANIMATION_TEXT) + 1
+        animationLastScrollTime = now
+        sendAnimationFrame()
+    end
+end
+
 local function sendNameUpdate(name)
     pendingNameWrite = name
     pendingSaveWrite = false
@@ -114,7 +176,7 @@ local function sendNameRefresh(name)
 end
 
 local function scheduleRequests()
-    if pendingNameWrite or pendingSaveWrite or pendingRefreshWrite then
+    if pendingNameWrite or pendingSaveWrite or pendingRefreshWrite or animationActive then
         return
     end
     local now = getTime()
@@ -152,7 +214,9 @@ local function processReplies()
             craftNameText = table.concat(name)
             requestStage = 3
         elseif cmd == MSP_SET_NAME then
-            if pendingRefreshWrite then
+            if pendingAnimationWrite then
+                pendingAnimationWrite = false
+            elseif pendingRefreshWrite then
                 -- Second SET_NAME after EEPROM_WRITE; sole purpose is to
                 -- force osdAnalyzeActiveElements() so the OSD repaints.
                 pendingRefreshWrite = false
@@ -207,12 +271,29 @@ local function activateButton(btn, telemetryReady)
     if not btn then
         return
     end
-    if pendingNameWrite or pendingSaveWrite or pendingRefreshWrite then
-        setStatus("Update already in progress")
-        return
-    end
     if not telemetryReady then
         setStatus("Telemetry unavailable")
+        return
+    end
+    if btn.action == "toggleAnimation" then
+        if pendingNameWrite or pendingSaveWrite or pendingRefreshWrite then
+            setStatus("Update already in progress")
+            return
+        end
+        if animationActive then
+            stopAnimation()
+            activeButtonId = nil
+        else
+            activeButtonId = btn.id
+            startAnimation()
+        end
+        return
+    end
+    if animationActive then
+        stopAnimation()
+    end
+    if pendingNameWrite or pendingSaveWrite or pendingRefreshWrite then
+        setStatus("Update already in progress")
         return
     end
     local resolver = btn.resolveName
@@ -263,10 +344,15 @@ end
 
 local function drawButtons(telemetryReady)
     local busy = pendingNameWrite or pendingSaveWrite or pendingRefreshWrite
-    local buttonsEnabled = telemetryReady and not busy
     for _, btn in ipairs(BUTTONS) do
         local label = btn.label
-        if busy and activeButtonId == btn.id then
+        local enabled = telemetryReady and not busy
+        if btn.action == "toggleAnimation" then
+            if animationActive then
+                label = "Stop Animation"
+                enabled = telemetryReady
+            end
+        elseif busy and activeButtonId == btn.id then
             if pendingSaveWrite then
                 label = "Saving..."
             elseif pendingRefreshWrite then
@@ -275,7 +361,6 @@ local function drawButtons(telemetryReady)
                 label = "Updating..."
             end
         end
-        local enabled = buttonsEnabled
         if not enabled and busy and activeButtonId == btn.id then
             enabled = true
         end
@@ -298,9 +383,12 @@ local function run(event, touchState)
         pendingNameWrite = nil
         pendingSaveWrite = false
         pendingRefreshWrite = false
+        pendingAnimationWrite = false
+        animationActive = false
         activeButtonId = nil
     else
         scheduleRequests()
+        tickAnimation()
         mspProcessTxQ()
         processReplies()
     end
