@@ -11,8 +11,9 @@ local VIEW_H = H - HUD_H    -- 3D viewport height (even)
 if VIEW_H % 2 == 1 then VIEW_H = VIEW_H - 1; HUD_H = H - VIEW_H end
 local HUD_Y  = VIEW_H
 local HALF_H = VIEW_H / 2
-local COL_W  = 2            -- pixels per column
-local COLS   = math.floor(W / COL_W)
+local COL_W  = 2            -- pixels per column (adaptive: 2..4)
+local COLS   = math.ceil(W / COL_W)
+local COL_W_MIN, COL_W_MAX = 2, 4
 local MAX_D  = 16           -- DDA depth limit
 local FP     = 256          -- fixed-point scale for player position
 local GUN_W  = 48
@@ -44,12 +45,33 @@ local function mapGet(x, y)
   return string.sub(MAP[y + 1], x + 1, x + 1)
 end
 
+-- Flat wall lookup (hot path) and per-row wall runs for the minimap
+local WALL = {}
+local WALL_RUNS = {}
+for y = 0, MAP_H - 1 do
+  local runX
+  for x = 0, MAP_W do
+    local w = mapGet(x, y) == "#" and x < MAP_W
+    if x < MAP_W then WALL[y * MAP_W + x + 1] = w end
+    if w and not runX then runX = x end
+    if not w and runX then
+      WALL_RUNS[#WALL_RUNS + 1] = { runX, y, x - runX }
+      runX = nil
+    end
+  end
+end
+
+local function isWallCell(x, y)
+  if x < 0 or y < 0 or x >= MAP_W or y >= MAP_H then return true end
+  return WALL[y * MAP_W + x + 1]
+end
+
 local function isWall(x, y)
-  return mapGet(math.floor(x), math.floor(y)) == "#"
+  return isWallCell(math.floor(x), math.floor(y))
 end
 
 local function isWallFP(x, y)
-  return mapGet(math.floor(x / FP), math.floor(y / FP)) == "#"
+  return isWallCell(math.floor(x / FP), math.floor(y / FP))
 end
 
 local function fpToWorld(v)
@@ -75,23 +97,28 @@ local kills    = 0
 local dead     = false
 local won      = false
 local reloadT  = 0 -- Reload timer (ticks until can shoot again after ammo runs out)
-local RELOAD_TICKS = 180 -- Ticks to reload after ammo runs out (at 50fps, 180 ticks = ~3.6s)
+-- All *_TICKS and speeds below are in 20 ms ticks (50 fps); run() scales them by frameScale
+local RELOAD_TICKS = 180 -- ~3.6s
 local AMMO_MAX = 30
 local ENEMY_HP = 30
-local RESPAWN_TICKS = 240 -- Enemy respawn time in ticks (at 50fps, 240 ticks = ~4.8s)
-local ITEM_RESPAWN_TICKS = 300 -- Item respawn time in ticks (at 50fps, 240 ticks = ~4.8s)
+local RESPAWN_TICKS = 240 -- ~4.8s
+local ITEM_RESPAWN_TICKS = 300 -- ~6s
+local ENEMY_SPEED = 0.015
+local ENEMY_ATTACK_TICKS = 30
 
 local splashT = 0
 local inSplash = true
 local fpsFrameCount = 0
 local fpsLastTime = getTime()
 local fpsValue = 0
+local lastTick = nil
+local frameScale = 1
 local hudFrame = 0
 local lastFlashActive = false
 local hitFlashT = 0
 local shotFlashT = 0
 local healFlashT = 0
-local HIT_FLASH_TICKS = 25   -- ~0.5s at 50fps
+local HIT_FLASH_TICKS = 25   -- ~0.5s
 local SHOT_FLASH_TICKS = 6
 local HEAL_FLASH_TICKS = 10
 
@@ -106,17 +133,11 @@ local sfPrev    = false -- SF previous state for edge detection
 
 -- ── Input sources ─────────────────────────────────────────────────────────────
 local srcRot, srcFwd, srcStr  -- channel names for rotation / forward / strafe
-local dbgRot, dbgFwd, dbgStr = 0, 0, 0  -- last raw values for HUD debug
-local dbgRotCmd, dbgFwdCmd, dbgStrCmd = 0, 0, 0 -- mapped movement commands
-local dbgDX, dbgDY, dbgDirDX, dbgDirDY = 0, 0, 0, 0 -- applied per-frame deltas
-local dbgBlkX, dbgBlkY = 0, 0 -- collision block flags for current frame
-local dbgNx, dbgNy = 0, 0
-local dbgMoveX, dbgMoveY = 0, 0
 local stickRot, stickFwd, stickStrafe = 0, 0, 0
 
 -- ── Z-buffer ──────────────────────────────────────────────────────────────────
 local zbuf = {}
-for i = 1, COLS do zbuf[i] = 999 end
+for i = 1, math.ceil(W / COL_W_MIN) do zbuf[i] = 999 end
 
 -- ── Colors (pre-computed at load time) ────────────────────────────────────────
 local C_SKY   = lcd.RGB(12,  12,  80)
@@ -181,6 +202,13 @@ local function fillRect(x, y, w, h, col)
   if w <= 0 or h <= 0 then return end
   lcd.setColor(CUSTOM_COLOR, col)
   lcd.drawFilledRectangle(x, y, w, h, CUSTOM_COLOR)
+end
+
+-- Clips to the 3D viewport so close sprites don't spill into the HUD
+local function fillRectV(x, y, w, h, col)
+  if y < 0 then h = h + y; y = 0 end
+  if y + h > VIEW_H then h = VIEW_H - y end
+  fillRect(x, y, w, h, col)
 end
 
 local function wallColor(dist, side)
@@ -262,8 +290,9 @@ local function renderScene()
     local rdy = pdy + ppy * camX
 
     local mx, my = math.floor(pxw), math.floor(pyw)
-    local ddx = (rdx == 0) and 1e30 or math.abs(1 / rdx)
-    local ddy = (rdy == 0) and 1e30 or math.abs(1 / rdy)
+    -- Some EdgeTX builds mis-compare a float against an integer literal with ==
+    local ddx = (math.abs(rdx) < 1e-9) and 1e30 or math.abs(1 / rdx)
+    local ddy = (math.abs(rdy) < 1e-9) and 1e30 or math.abs(1 / rdy)
 
     local stepx, stepy, sidex, sidey
     if rdx < 0 then stepx = -1; sidex = (pxw - mx)      * ddx
@@ -276,7 +305,7 @@ local function renderScene()
     while steps < RAY_STEP_LIMIT do
       if sidex < sidey then sidex = sidex + ddx; mx = mx + stepx; side = 0
       else                  sidey = sidey + ddy; my = my + stepy; side = 1 end
-      if mapGet(mx, my) == "#" then hit = true; break end
+      if isWallCell(mx, my) then hit = true; break end
       steps = steps + 1
     end
     local dist = FAR_Z
@@ -292,12 +321,25 @@ local function renderScene()
       if lh < 1 then lh = 1 end
       local y0 = math.max(0,          HALF_H - math.floor(lh / 2))
       local y1 = math.min(VIEW_H - 1, HALF_H + math.floor(lh / 2))
-      fillRect(col * COL_W, y0, COL_W, y1 - y0 + 1, wallColor(dist, side))
+      local x = col * COL_W
+      fillRect(x, y0, math.min(COL_W, W - x), y1 - y0 + 1, wallColor(dist, side))
     end
   end
 end
 
 -- ── Sprites ───────────────────────────────────────────────────────────────────
+local spr, sprPool = {}, {}
+
+local function sprFar(a, b) return a.d2 > b.d2 end
+
+local function sprAdd(kind, obj, sx, sy)
+  local n = #spr + 1
+  local s = sprPool[n]
+  if not s then s = {}; sprPool[n] = s end
+  s.kind, s.obj, s.sx, s.sy, s.d2 = kind, obj, sx, sy, sx * sx + sy * sy
+  spr[n] = s
+end
+
 local function renderSprites()
   local pxw = fpToWorld(px)
   local pyw = fpToWorld(py)
@@ -305,24 +347,14 @@ local function renderSprites()
   if math.abs(det) < 1e-9 then return end
   local inv = 1 / det
 
-  local spr = {}
+  for i = #spr, 1, -1 do spr[i] = nil end
   for _, e in ipairs(enemies) do
-    if e.alive then
-      local sx = e.x - pxw
-      local sy = e.y - pyw
-      local d2 = sx * sx + sy * sy
-      spr[#spr + 1] = { kind = "enemy", e = e, sx = sx, sy = sy, d2 = d2 }
-    end
+    if e.alive then sprAdd("enemy", e, e.x - pxw, e.y - pyw) end
   end
   for _, it in ipairs(items) do
-    if it.alive then
-      local sx = it.x - pxw
-      local sy = it.y - pyw
-      local d2 = sx * sx + sy * sy
-      spr[#spr + 1] = { kind = "item", it = it, sx = sx, sy = sy, d2 = d2 }
-    end
+    if it.alive then sprAdd("item", it, it.x - pxw, it.y - pyw) end
   end
-  table.sort(spr, function(a, b) return a.d2 > b.d2 end)
+  table.sort(spr, sprFar)
 
   for i = 1, #spr do
     local s = spr[i]
@@ -344,12 +376,12 @@ local function renderSprites()
 
         if x1 >= 0 and x0 < W and y1 > y0 then
           if s.kind == "item" then
-            drawItemSprite(s.it.kind, x0, x1, y0, y1, tz)
+            drawItemSprite(s.obj.kind, x0, x1, y0, y1, tz)
           else
           local headH = math.max(1, math.floor(sprH * 0.22))
           local torsoH = math.max(1, math.floor(sprH * 0.43))
           local legH = math.max(1, sprH - headH - torsoH)
-          local headY = y0
+          local headY = HALF_H - math.floor(sprH / 2)
           local torsoY = headY + headH
           local legY = torsoY + torsoH
           local armY = torsoY + math.floor(torsoH * 0.15)
@@ -380,22 +412,22 @@ local function renderSprites()
 
             if dw > 0 and tz <= zbuf[c] then
               if dx + dw - 1 >= headX0 and dx <= headX0 + headW - 1 then
-                fillRect(dx, headY, dw, headH, C_HEAD)
+                fillRectV(dx, headY, dw, headH, C_HEAD)
               end
               if dx + dw - 1 >= torsoX0 and dx <= torsoX0 + torsoW - 1 then
-                fillRect(dx, torsoY, dw, torsoH, C_BODY)
+                fillRectV(dx, torsoY, dw, torsoH, C_BODY)
               end
               if dx + dw - 1 >= leftArmX0 and dx <= leftArmX0 + armW - 1 then
-                fillRect(dx, armY, dw, torsoH, C_BODY)
+                fillRectV(dx, armY, dw, torsoH, C_BODY)
               end
               if dx + dw - 1 >= rightArmX0 and dx <= rightArmX0 + armW - 1 then
-                fillRect(dx, armY, dw, torsoH, C_BODY)
+                fillRectV(dx, armY, dw, torsoH, C_BODY)
               end
               if dx + dw - 1 >= leftLegX0 and dx <= leftLegX0 + legW - 1 then
-                fillRect(dx, legY, dw, legH, C_LEGS)
+                fillRectV(dx, legY, dw, legH, C_LEGS)
               end
               if dx + dw - 1 >= rightLegX0 and dx <= rightLegX0 + legW - 1 then
-                fillRect(dx, legY, dw, legH, C_LEGS)
+                fillRectV(dx, legY, dw, legH, C_LEGS)
               end
             end
           end
@@ -415,14 +447,13 @@ local function renderGun()
   if flashT > 0 then
     local fx = gx + math.floor(GUN_W / 2)
     local fy = gy - 22
-    -- Spark burst: cross + diagonals + glow dot
+    -- Spark burst: cross + diagonals
     lcd.setColor(CUSTOM_COLOR, C_FLASH)
     lcd.drawLine(fx - 10, fy, fx + 10, fy, CUSTOM_COLOR)
     lcd.drawLine(fx, fy - 8, fx, fy + 8, CUSTOM_COLOR)
     lcd.setColor(CUSTOM_COLOR, C_FLASH2)
     lcd.drawLine(fx - 7, fy - 7, fx + 7, fy + 7, CUSTOM_COLOR)
     lcd.drawLine(fx - 7, fy + 7, fx + 7, fy - 7, CUSTOM_COLOR)
-    -- removed glow dot
   end
 end
 
@@ -527,13 +558,23 @@ local function renderEndScreen(title, titleCol)
   renderTitleScreen(title, string.format("KILLS: %d", kills), titleCol, false)
 end
 
-local function updateFps()
+local function setColW(cw)
+  COL_W = cw
+  COLS = math.ceil(W / COL_W)
+  for i = 1, COLS do zbuf[i] = 999 end
+end
+
+local function updateFps(now)
   fpsFrameCount = fpsFrameCount + 1
-  local now = getTime()
   if now - fpsLastTime >= 100 then
     fpsValue = fpsFrameCount
     fpsFrameCount = 0
     fpsLastTime = now
+    if fpsValue < 12 and COL_W < COL_W_MAX then
+      setColW(COL_W + 1)
+    elseif fpsValue >= 18 and COL_W > COL_W_MIN then
+      setColW(COL_W - 1)
+    end
   end
 end
 
@@ -547,12 +588,10 @@ local function renderMinimap()
 
   fillRect(mmX - 1, mmY - 1, mmW + 2, mmH + 2, C_MAP_BG)
 
-  for y = 0, MAP_H - 1 do
-    for x = 0, MAP_W - 1 do
-      local c = mapGet(x, y)
-      local col = (c == "#") and C_MAP_WALL or C_MAP_FLOOR
-      fillRect(mmX + x * scale, mmY + y * scale, scale, scale, col)
-    end
+  fillRect(mmX, mmY, mmW, mmH, C_MAP_FLOOR)
+  for i = 1, #WALL_RUNS do
+    local r = WALL_RUNS[i]
+    fillRect(mmX + r[1] * scale, mmY + r[2] * scale, r[3] * scale, scale, C_MAP_WALL)
   end
 
   for _, e in ipairs(enemies) do
@@ -571,6 +610,33 @@ local function renderMinimap()
   lcd.drawFilledCircle(pxm + 1, pym + 1, 1, CUSTOM_COLOR)
 end
 
+local function interp(xa, ya, xb, yb, y)
+  if yb == ya then return xa end
+  return xa + (xb - xa) * (y - ya) / (yb - ya)
+end
+
+local function fillTriangle(x1, y1, x2, y2, x3, y3, col)
+  x1, y1 = roundToInt(x1), roundToInt(y1)
+  x2, y2 = roundToInt(x2), roundToInt(y2)
+  x3, y3 = roundToInt(x3), roundToInt(y3)
+  if y2 < y1 then x1, x2 = x2, x1; y1, y2 = y2, y1 end
+  if y3 < y1 then x1, x3 = x3, x1; y1, y3 = y3, y1 end
+  if y3 < y2 then x2, x3 = x3, x2; y2, y3 = y3, y2 end
+
+  for y = y1, y3 do
+    local xa, xb
+    if y < y2 then
+      xa = interp(x1, y1, x2, y2, y)
+      xb = interp(x1, y1, x3, y3, y)
+    else
+      xa = interp(x2, y2, x3, y3, y)
+      xb = interp(x1, y1, x3, y3, y)
+    end
+    if xa > xb then xa, xb = xb, xa end
+    fillRect(roundToInt(xa), y, roundToInt(xb - xa) + 1, 1, col)
+  end
+end
+
 local function renderCompass()
   local scale = MINIMAP_SCALE
   local mmW = MAP_W * scale
@@ -585,33 +651,6 @@ local function renderCompass()
   lcd.setColor(CUSTOM_COLOR, C_COMPASS)
   local r = math.floor(math.min(mmW, mmH) / 2) - 2
   if r < 4 then r = 4 end
-  local function fillTriangle(x1, y1, x2, y2, x3, y3, col)
-    x1, y1 = roundToInt(x1), roundToInt(y1)
-    x2, y2 = roundToInt(x2), roundToInt(y2)
-    x3, y3 = roundToInt(x3), roundToInt(y3)
-    if y2 < y1 then x1, x2 = x2, x1; y1, y2 = y2, y1 end
-    if y3 < y1 then x1, x3 = x3, x1; y1, y3 = y3, y1 end
-    if y3 < y2 then x2, x3 = x3, x2; y2, y3 = y3, y2 end
-
-    local function interp(xa, ya, xb, yb, y)
-      if yb == ya then return xa end
-      return xa + (xb - xa) * (y - ya) / (yb - ya)
-    end
-
-    for y = y1, y3 do
-      local xa, xb
-      if y < y2 then
-        xa = interp(x1, y1, x2, y2, y)
-        xb = interp(x1, y1, x3, y3, y)
-      else
-        xa = interp(x2, y2, x3, y3, y)
-        xb = interp(x1, y1, x3, y3, y)
-      end
-      if xa > xb then xa, xb = xb, xa end
-      fillRect(roundToInt(xa), y, roundToInt(xb - xa) + 1, 1, col)
-    end
-  end
-
   -- Base circle
   lcd.setColor(CUSTOM_COLOR, C_COMPASS)
   lcd.drawFilledCircle(centerX, centerY, r, CUSTOM_COLOR)
@@ -673,7 +712,6 @@ local function renderHUD()
   renderSmiley(faceX, faceY, faceR, mood)
 
   -- Stats centered between smiley and minimap
-  local mmW = MAP_W * MINIMAP_SCALE
   local gap = 6
   local leftEdge = MINIMAP_PAD + mmW + gap
   local rightEdge = W - MINIMAP_PAD - mmW - gap
@@ -708,12 +746,20 @@ local MOV  = 0.08
 local INV_ROT = 1
 local INV_FWD = 1
 local INV_STR = -1
-local TEST_FORCE_PX = nil -- set to +/- value to bypass movement math entirely
 
-local function axisStep(v)
-  if v > DEAD then return 1 end
-  if v < -DEAD then return -1 end
-  return 0
+-- Stick value (-1024..1024) -> -1..1 with deadzone removed
+local function axisScale(v)
+  local a = math.abs(v)
+  if a <= DEAD then return 0 end
+  a = (a - DEAD) / (1024 - DEAD)
+  if a > 1 then a = 1 end
+  return v < 0 and -a or a
+end
+
+local function rotExpo(x)
+  local a = math.abs(x)
+  local o = a * (0.4 + 0.6 * a * a)
+  return x < 0 and -o or o
 end
 
 local function rebuildViewFromAngle()
@@ -733,13 +779,9 @@ local function readHardware()
   local rsx = safeGet(srcStr)  -- right stick X: strafe
   local sf  = safeGet("sf")    -- SF switch
 
-  dbgRot, dbgFwd, dbgStr = lsx, rsy, rsx  -- store for HUD
-
-  -- Binary: any deflection past dead zone -> full speed (immune to calibration range)
-  stickRot    = axisStep(lsx * INV_ROT)
-  stickFwd    = axisStep(rsy * INV_FWD)
-  stickStrafe = axisStep(rsx * INV_STR)
-  dbgRotCmd, dbgFwdCmd, dbgStrCmd = stickRot, stickFwd, stickStrafe
+  stickRot    = rotExpo(axisScale(lsx * INV_ROT))
+  stickFwd    = axisScale(rsy * INV_FWD)
+  stickStrafe = axisScale(rsx * INV_STR)
 
   local sfNow = sf > 512
   if sfNow and not sfPrev then firing = true end
@@ -749,76 +791,23 @@ local function readHardware()
 end
 
 -- ── Player movement ───────────────────────────────────────────────────────────
-local function updatePlayer(stickRot, stickFwd, stickStrafe)
-  local oldPx, oldPy = px, py
-  local oldPdx, oldPdy = pdx, pdy
-  dbgBlkX, dbgBlkY = 0, 0
-  dbgMoveX, dbgMoveY = 0, 0
-  dbgNx, dbgNy = px, py
+local function tryMove(dx, dy)
+  if not isWallFP(px + dx, py) then px = px + dx end
+  if not isWallFP(px, py + dy) then py = py + dy end
+end
 
-  -- Rotation: left stick X
-  if stickRot ~= 0 then
-    pa = pa + stickRot * ROT
-  end
+local function updatePlayer(stickRot, stickFwd, stickStrafe)
+  pa = pa + stickRot * ROT * frameScale
   rebuildViewFromAngle()
 
-  -- Forward / backward: right stick Y
-  if stickFwd ~= 0 then
-    local f = stickFwd * MOV
-    local dx = roundToInt(pdx * f * FP)
-    local dy = roundToInt(pdy * f * FP)
-    dbgNx = px + dx
-    dbgNy = py + dy
-
-    -- Test X and Y independently from the original position.
-    local canMoveX = not isWallFP(px + dx, py)
-    local canMoveY = not isWallFP(px, py + dy)
-
-    if canMoveX then
-      px = px + dx
-      dbgMoveX = 1
-    else
-      dbgBlkX = 1
-    end
-
-    if canMoveY then
-      py = py + dy
-      dbgMoveY = 1
-    else
-      dbgBlkY = 1
-    end
-  end
+  -- A step is at most MOV * 5 = 0.4 cell, so it can't jump a full wall cell.
+  -- Axes are tested one after the other so the result never lands in a diagonal corner.
+  local f = stickFwd * MOV * frameScale
+  tryMove(roundToInt(pdx * f * FP), roundToInt(pdy * f * FP))
 
   -- Strafe: right stick X  (right = positive)
-  if stickStrafe ~= 0 then
-    local s = stickStrafe * MOV
-    local dx = roundToInt(pdy * s * FP)
-    local dy = roundToInt(-pdx * s * FP)
-    dbgNx = px + dx
-    dbgNy = py + dy
-
-    local canMoveX = not isWallFP(px + dx, py)
-    local canMoveY = not isWallFP(px, py + dy)
-
-    if canMoveX then
-      px = px + dx
-      dbgMoveX = 1
-    else
-      dbgBlkX = 1
-    end
-
-    if canMoveY then
-      py = py + dy
-      dbgMoveY = 1
-    else
-      dbgBlkY = 1
-    end
-  end
-
-  dbgDX = fpToWorld(px - oldPx)
-  dbgDY = fpToWorld(py - oldPy)
-  dbgDirDX = pdx - oldPdx
-  dbgDirDY = pdy - oldPdy
+  local s = stickStrafe * MOV * frameScale
+  tryMove(roundToInt(pdy * s * FP), roundToInt(-pdx * s * FP))
 end
 
 -- ── Shooting ──────────────────────────────────────────────────────────────────
@@ -831,8 +820,8 @@ local function shoot()
   local pxw = fpToWorld(px)
   local pyw = fpToWorld(py)
   local mx, my = math.floor(pxw), math.floor(pyw)
-  local ddx = (pdx == 0) and 1e30 or math.abs(1 / pdx)
-  local ddy = (pdy == 0) and 1e30 or math.abs(1 / pdy)
+  local ddx = (math.abs(pdx) < 1e-9) and 1e30 or math.abs(1 / pdx)
+  local ddy = (math.abs(pdy) < 1e-9) and 1e30 or math.abs(1 / pdy)
   local stepx, stepy, sidex, sidey
   if pdx < 0 then stepx = -1; sidex = (pxw - mx)      * ddx
   else             stepx =  1; sidex = (mx + 1 - pxw) * ddx end
@@ -842,7 +831,7 @@ local function shoot()
   for _ = 1, MAX_D do
     if sidex < sidey then sidex = sidex + ddx; mx = mx + stepx
     else                  sidey = sidey + ddy; my = my + stepy end
-    if mapGet(mx, my) == "#" then break end
+    if isWallCell(mx, my) then break end
     for _, e in ipairs(enemies) do
       if e.alive and math.floor(e.x) == mx and math.floor(e.y) == my then
         e.hp = e.hp - math.random(10, 20)
@@ -867,13 +856,13 @@ local function updateEnemies()
       local d2 = dx * dx + dy * dy
       if d2 > 0.0001 and d2 < 64 then
         local inv = 1 / math.sqrt(d2)
-        local nx = e.x + (dx * inv) * 0.015
-        local ny = e.y + (dy * inv) * 0.015
+        local nx = e.x + (dx * inv) * ENEMY_SPEED * frameScale
+        local ny = e.y + (dy * inv) * ENEMY_SPEED * frameScale
         if not isWall(nx, e.y) then e.x = nx end
         if not isWall(e.x, ny) then e.y = ny end
         if d2 < (0.85 * 0.85) then
-          e.timer = e.timer + 1
-          if e.timer >= 30 then
+          e.timer = e.timer + frameScale
+          if e.timer >= ENEMY_ATTACK_TICKS then
             health = math.max(0, health - math.random(10, 20))
             hitFlashT = HIT_FLASH_TICKS
             e.timer = 0
@@ -881,7 +870,7 @@ local function updateEnemies()
         end
       end
     elseif e.respawnT and e.respawnT > 0 then
-      e.respawnT = e.respawnT - 1
+      e.respawnT = e.respawnT - frameScale
       if e.respawnT <= 0 then
         e.alive = true
         e.hp = ENEMY_HP
@@ -896,7 +885,7 @@ end
 local function updateItems()
   for _, it in ipairs(items) do
     if not it.alive and it.respawnT and it.respawnT > 0 then
-      it.respawnT = it.respawnT - 1
+      it.respawnT = it.respawnT - frameScale
       if it.respawnT <= 0 then
         it.alive = true
       end
@@ -936,11 +925,16 @@ end
 
 -- ── Run ───────────────────────────────────────────────────────────────────────
 local function run(event)
-  updateFps()
+  local now = getTime()
+  if lastTick then
+    frameScale = math.max(0.25, math.min(5, (now - lastTick) / 2))
+  end
+  lastTick = now
+  updateFps(now)
   if inSplash then
-    splashT = splashT + 1
+    splashT = splashT + frameScale
     readHardware()
-    -- Start on any stick movement or after timeout (~3s at 50fps)
+    -- Start on any stick movement or after timeout (~3s)
     if math.abs(stickRot) > 0 or math.abs(stickFwd) > 0 or math.abs(stickStrafe) > 0 or splashT > 150 then
       inSplash = false
     end
@@ -952,9 +946,6 @@ local function run(event)
     firing = false                          -- reset; handlers below may set it
     readHardware()
     updatePlayer(stickRot, stickFwd, stickStrafe)
-    if TEST_FORCE_PX ~= nil then
-      px = px + roundToInt(TEST_FORCE_PX * FP)
-    end
     local pxw = fpToWorld(px)
     local pyw = fpToWorld(py)
     for _, it in ipairs(items) do
@@ -979,7 +970,7 @@ local function run(event)
     updateItems()
     updateEnemies()
     if ammo <= 0 then
-      reloadT = reloadT + 1
+      reloadT = reloadT + frameScale
       if reloadT >= RELOAD_TICKS then
         ammo = AMMO_MAX
         reloadT = 0
@@ -988,10 +979,10 @@ local function run(event)
       reloadT = 0
     end
     if firing  then shoot() end
-    if flashT > 0 then flashT = flashT - 1 end
-    if hitFlashT > 0 then hitFlashT = hitFlashT - 1 end
-    if healFlashT > 0 then healFlashT = healFlashT - 1 end
-    if shotFlashT > 0 then shotFlashT = shotFlashT - 1 end
+    if flashT > 0 then flashT = flashT - frameScale end
+    if hitFlashT > 0 then hitFlashT = hitFlashT - frameScale end
+    if healFlashT > 0 then healFlashT = healFlashT - frameScale end
+    if shotFlashT > 0 then shotFlashT = shotFlashT - frameScale end
     if kills >= 10 then won = true end
     if health <= 0 then dead = true end
   end
@@ -1009,7 +1000,7 @@ local function run(event)
   renderScreenFlash()
 
   lcd.setColor(CUSTOM_COLOR, C_WHITE)
-  lcd.drawText(W - 4, 2, string.format("%d FPS", fpsValue), RIGHT + SMLSIZE + CUSTOM_COLOR)
+  lcd.drawText(W - 4, 2, string.format("%d FPS c%d", fpsValue, COL_W), RIGHT + SMLSIZE + CUSTOM_COLOR)
 
   if won then
     renderEndScreen("CONGRATS!", C_YELL)
@@ -1020,4 +1011,8 @@ local function run(event)
   return 0
 end
 
-return { init = init, run = run }
+local function state()
+  return fpToWorld(px), fpToWorld(py), health, ammo, kills, COL_W
+end
+
+return { init = init, run = run, _state = state }
